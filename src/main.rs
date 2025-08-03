@@ -1,4 +1,8 @@
 use core::f32;
+use std::io::{self, Write};
+
+mod tokenizer;
+mod dataloader;
 
 // T = sequence_length
 // B = batch_size
@@ -192,6 +196,7 @@ fn softmax_forward(
             for v in 0..V {
                 probs.push(f32::exp(logits[btv + v] / temperature) / sum);
             }
+            // Pad probabilities
             for _ in V..Vp {
                 probs.push(0f32);
             }
@@ -275,51 +280,6 @@ fn layernorm_forward(
     output
 }
 
-pub struct Dataset {}
-
-impl Dataset {}
-
-pub struct Tokenizer {
-    vocab_size: usize,
-    eot_token: u32,
-    token_table: Option<Vec<String>>,
-}
-
-impl Tokenizer {
-    fn check(&self, dataset: Vec<usize>) {
-        // validate inputs: check if all indicateurs are between [0, V)
-        let vocab_size = self.vocab_size;
-        for token_id in dataset {
-            assert!(
-                token_id < vocab_size,
-                "Token {token_id} is superior to {vocab_size}"
-            );
-        }
-    }
-
-    fn decode(&self, token_id: usize) -> &String {
-        if token_id < self.vocab_size {
-            // Access the token table safely
-            if let Some(token_table) = &self.token_table {
-                if let Some(token) = token_table.get(token_id) {
-                    return token;
-                }
-            }
-            panic!("Invalid token_id: token {token_id} not found.");
-        } else {
-            panic!("`token_id` must be smaller than vocab_size");
-        }
-    }
-
-    fn batch_decode(&self, tokens: &[usize]) -> String {
-        let mut output = String::new();
-        for t in tokens {
-            let substr = self.decode(*t);
-            output += substr;
-        }
-        output
-    }
-}
 
 pub struct ActivationTensors {
     encoded: Vec<f32>,   // (B, T, C)
@@ -347,52 +307,6 @@ pub struct ActivationTensors {
     losses: Vec<f32>,    // (B, T)
 }
 
-fn load_tokenizer(file: &str) -> Tokenizer {
-    // Load tokenizer
-    let bytes = std::fs::read(file).unwrap();
-
-    let mut iter = bytes.chunks_exact(4);
-    let mut tokenizer_header: [u32; 256] = [0; 256];
-    for i in 0..256 {
-        let byte_4 = iter.next().unwrap();
-        let double = u32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
-        tokenizer_header[i] = double;
-    }
-    // println!("Tokenizer header {:?}", tokenizer_header);
-
-    let mut tok = Tokenizer {
-        vocab_size: tokenizer_header[2] as usize,
-        eot_token: tokenizer_header[3],
-        token_table: None,
-    };
-
-    let mut token_table: Vec<String> = Vec::new();
-    let mut iter = bytes[1024..].chunks(1);
-    for i in 0..tok.vocab_size {
-        let byte_4 = iter.next().unwrap();
-        let length: u8 = byte_4[0];
-
-        // println!("Length: {}", length);
-        let mut token = String::new();
-        for j in 0..length {
-            let byte = iter.next().unwrap()[0];
-            let c: char = char::from(byte);
-            token.push(c);
-        }
-        token_table.push(token);
-    }
-    // println!("{:?}", token_table);
-    assert!(
-        token_table.len() == tok.vocab_size,
-        "length are not equals token_table={}, vocab_size= {}",
-        token_table.len(),
-        tok.vocab_size
-    );
-    tok.token_table = Some(token_table);
-
-    tok
-}
-
 pub struct Config {
     vocab_size: usize,
     padded_vocab_size: usize,
@@ -406,26 +320,44 @@ pub struct Config {
 }
 
 pub struct GPT2 {
-    total_parameters: Option<u32>,
+    num_parameters: Option<usize>,
+    num_activations: Option<usize>,
     header: [u32; 256],
     params: Option<ParameterTensors>,
+    grads: Option<ParameterTensors>,
     acts: Option<ActivationTensors>,
     param_sizes: Option<[usize; 16]>,
     config: Config,
+    // gradients of the activations
+    grads_acts: Option<ActivationTensors>,
+    grads_acts_memory: Option<Vec<f32>>,
+    // memory for adamw
+    params_memory: Option<Vec<f32>>,
+    grads_memory: Option<Vec<f32>>,
+    m_memory: Option<Vec<f32>>,
+    v_memory: Option<Vec<f32>>,
 }
 
 impl GPT2 {
     fn new(header: [u32; 256], config: Config) -> GPT2 {
         let mut gpt2 = GPT2 {
-            total_parameters: None,
+            num_parameters: None,
+            num_activations: None,
             param_sizes: None,
             params: None,
+            grads: None,
             acts: None,
             header: header,
             config: config,
+            grads_acts: None,
+            grads_acts_memory: None,
+            params_memory: None,
+            grads_memory: None,
+            m_memory: None,
+            v_memory: None,
         };
 
-        let mut acts = load_activations(&gpt2);
+        let mut acts = init_activations(&gpt2);
         gpt2.acts = Some(acts);
 
         return gpt2;
@@ -437,7 +369,6 @@ impl GPT2 {
         let V: usize = self.config.vocab_size;
         let Vp: usize = self.config.padded_vocab_size;
         let L: usize = self.config.num_layers;
-        // let L: usize = 1;
         let NH: usize = self.config.num_heads;
         let C: usize = self.config.channels;
 
@@ -448,7 +379,7 @@ impl GPT2 {
         let mut residual: &[f32];
         acts.encoded = encoder_forward(inputs, &params.wte, &params.wpe, B, T, C);
         for l in 0..L {
-            println!("Layer n°{}", l);
+            // println!("Layer n°{}", l);
             if l == 0 {
                 residual = &acts.encoded;
             } else {
@@ -499,7 +430,7 @@ impl GPT2 {
             );
             acts.residual3 = residual_forward(&acts.residual2, &acts.fcproj, B * T * C);
         }
-        println!("Layers applied");
+        // println!("Layers applied");
         acts.lnf = layernorm_forward(
             &mut acts.lnf_mean,
             &mut acts.lnf_rstd,
@@ -516,13 +447,12 @@ impl GPT2 {
         return acts.probs.clone();
     }
 
-    fn loss(&mut self, inputs: &[usize], targets: &[usize], temperature: f32) {
+    fn loss(&mut self, probs: &[f32], targets: &[usize]) -> f32 {
         // targets is (B,T)
         let B: usize = self.config.B;
         let Vp: usize = self.config.padded_vocab_size;
         let V: usize = self.config.vocab_size;
         let T: usize = self.config.T;
-        let probs = self.forward(inputs, temperature);
         let mut acts = self.acts.as_mut().unwrap();
         acts.losses = crossentropy_forward(&probs, targets, B, T, Vp);
         let mut mean_loss: f32 = 0.0;
@@ -532,26 +462,30 @@ impl GPT2 {
         mean_loss /= (B * T) as f32;
         println!("Mean loss: {}", mean_loss);
 
+        // Check the probability that the model is giving to the target token
+        // It should increase during training
         if true {
             for (i, target_token) in targets.iter().enumerate() {
                 let target_token_probability = probs[i * Vp + target_token];
                 println!(
-                    "Expected '{}' - Probability '{}'",
+                    "Expected token {} - Probability {}",
                     target_token, target_token_probability
                 );
             }
         }
+        
+        mean_loss
     }
 
     fn backward(&self) {
-        // TODO: implement backpropagation
+        //todo: implement backpropagation
     }
 
     fn argmax(&self, probs: Vec<f32>, only_last: bool) -> Vec<usize> {
         // output is (B, T) if only_last=false
         // (B) if only_last=true
         // get the token with the highest probability for each dimension (temperature=1)
-        println!("Sampling token with the highest probability");
+        // println!("Sampling token with the highest probability");
         let B = self.config.B;
         let T = self.config.T;
         let Vp = self.config.padded_vocab_size;
@@ -592,18 +526,18 @@ impl GPT2 {
         token_ids
     }
 
-    fn sample(&mut self, inputs: Vec<usize>, N: usize, temperature: f32) -> Vec<usize> {
+    fn sample(&mut self, inputs: Vec<usize>, N: usize, temperature: f32, tokenizer: &tokenizer::Tokenizer) -> Vec<usize> {
         // inputs (B, T)
         // outputs (B, T + N)
         let B = self.config.B;
         let T: usize = self.config.T;
-        println!("Batch sampling of {} tokens", N);
+        // println!("Batch sampling of {} tokens", N);
         let mut modified_inputs = inputs.clone();
         let mut outputs = inputs.clone();
         for i in 0..N {
-            println!("Generate token n°{}", i);
+            // println!("Generate token n°{}", i);
             // inputs is (1,T)
-            println!("Inputs {:?}", modified_inputs);
+            // println!("Inputs {:?}", modified_inputs);
 
             // probs is (B, T, V)
             let probs: Vec<f32> = self.forward(&modified_inputs, temperature);
@@ -612,21 +546,58 @@ impl GPT2 {
             let tokens = self.argmax(probs, true);
 
             for b in 0..B {
-                outputs.insert((b + 1) * T + i, tokens[b]);
+                // Insert at the end of the batched input
+                outputs.insert((b + 1) * (T + i), tokens[b]);
+                // Insert at the end of the sentence
+                modified_inputs.insert((b + 1) * T, tokens[b]);
+                // Remove the first token
                 modified_inputs.remove(b * T);
-                modified_inputs.insert((b + 1) * T - 1, tokens[b])
+
+                if b == 0 {
+                    let token = tokenizer.decode(tokens[b]);
+                    print!("{}", token);
+                    io::stdout().flush().unwrap();  // Force flush
+                }
             }
         }
         outputs
     }
 
-    fn generate(&mut self, inputs: Vec<usize>, N: usize, temperature: f32, tokenizer: &Tokenizer) {
-        // let B = self.config.B;
+    fn generate(&mut self, inputs: Vec<usize>, N: usize, temperature: f32, tokenizer: &tokenizer::Tokenizer) {
+        let B = self.config.B;
         let T = self.config.T;
-        let completed_inputs = self.sample(inputs, N, temperature);
-        let completed_text = tokenizer.batch_decode(&completed_inputs[0..T + N]);
-        println!("Completed text: {}", completed_text);
+        //TODO: ignore B actually
+        let input_text = tokenizer.batch_decode(&inputs[0..T]);
+        println!("Input text: {}", input_text);
+        self.sample(inputs, N, temperature, tokenizer);
     }
+
+    fn zero_grad(&mut self) {
+        self.grads_acts_memory = Some(vec![0f32; self.num_activations.expect("Number of activations is not set!")]);
+        self.grads_memory = Some(vec![0f32; self.num_parameters.expect("Number of parameters is not set!")])
+    }
+
+    // fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, t: usize) {
+    //     // implement adamw algorithm
+    //     for i in 0..self.num_parameters.expect("Missing total parameters!") {
+    //         let param: f32 = self.params_memory.unwrap()[i];
+    //         // Get gradients w.r.t. stochastic objective at timestep t
+    //         let grad: f32 = self.grads_memory.unwrap()[i];
+    //         // Update biased first moment estimate
+    //         let m: f32 = beta1 * self.m_memory.unwrap()[i] + (1.0 - beta1) * grad;
+    //         // Update biased second raw moment estimate
+    //         let v: f32 = beta2 * self.v_memory.unwrap()[i] + (1.0 - beta2) * grad.powi(2);
+    //         // Compute bias-corrected first moment estimate
+    //         let m_hat: f32 = m / (1.0 - beta1);
+    //         // Compute bias-corrected second raw moment estimate
+    //         let v_hat: f32 = v / (1.0 - beta2);
+    //         // Update parameters
+    //         self.m_memory.unwrap()[i] = m;
+    //         self.v_memory.unwrap()[i] = v;
+    //         //todo: add sqrt on v
+    //         self.params_memory.unwrap()[i] -= learning_rate * (m_hat / (v_hat.sqrt() + eps) + weight_decay * param);
+    //     }
+    // }
 }
 
 pub struct ParameterTensors {
@@ -707,17 +678,22 @@ fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
     // println!("{:?}", param_sizes);
 
     // Total parameters
-    let mut total_params: u32 = 0;
+    let mut num_parameters: usize = 0;
     for n_params in param_sizes {
-        total_params += n_params as u32;
+        num_parameters += n_params;
     }
-    println!("Total parameters: {}M", total_params / 10u32.pow(6));
-    gpt.total_parameters = Some(total_params);
+    println!("Total parameters: {}M", num_parameters as u32 / 10u32.pow(6));
+    gpt.num_parameters = Some(num_parameters);
+
+    // Init 1st and 2nd moments
+    gpt.params_memory = Some(vec![0f32; num_parameters]);
+    gpt.m_memory = Some(vec![0f32; num_parameters]);
+    gpt.v_memory = Some(vec![0f32; num_parameters]);
 
     let mut matrices = Vec::new();
     for size in param_sizes.iter() {
         let mut i: usize = 0;
-        let mut matrix: Vec<f32> = vec![0_f32; *size];
+        let mut matrix: Vec<f32> = vec![0f32; *size];
         while i < *size {
             let byte_4 = iter.next().unwrap();
             let double = f32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
@@ -751,7 +727,7 @@ fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
     gpt
 }
 
-fn load_activations(gpt: &GPT2) -> ActivationTensors {
+fn init_activations(gpt: &mut GPT2) -> ActivationTensors {
     // Activations
     let mut act_sizes = [0; 23];
     let B: usize = gpt.config.B; // batch size
@@ -785,11 +761,12 @@ fn load_activations(gpt: &GPT2) -> ActivationTensors {
     act_sizes[21] = B * T * Vp; // probs
     act_sizes[22] = B * T; // losses
 
-    let mut total_acts = 0;
+    let mut num_activations = 0;
     for size in act_sizes {
-        total_acts += size;
+        num_activations += size;
     }
-    println!("Total activations: {}M", total_acts / 10usize.pow(6));
+    gpt.num_activations = Some(num_activations);
+    println!("Total activations: {}M", num_activations / 10usize.pow(6));
 
     ActivationTensors {
         encoded: vec![0.0; act_sizes[0]],
@@ -819,48 +796,33 @@ fn load_activations(gpt: &GPT2) -> ActivationTensors {
 }
 
 fn main() {
-    let data_path =
-        "/Users/guillaumephilippe/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
-    let model_path = "/Users/guillaumephilippe/llm.c/gpt2_124M.bin";
-    let tokenizer_path = "/Users/guillaumephilippe/llm.c/gpt2_tokenizer.bin";
+    let B: usize = 4;
+    let T: usize = 64;
+    let temperature: f32 = 1.0;
+    let tokens_to_sample: usize = 10;
 
-    // Load inputs
-    // TODO: Create a dataset class
-    let bytes = std::fs::read(&data_path).unwrap();
+    let train_data_path = "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
+    let val_data_path = "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
+    let model_path = "/Users/gphilippe/dev/llm.c/gpt2_124M.bin";
+    let tokenizer_path = "/Users/gphilippe/dev/llm.c/gpt2_tokenizer.bin";
 
-    let mut iter = bytes.chunks_exact(2);
-    let mut dataset: Vec<usize> = Vec::new();
-    // Data header
-    for _ in 0..512 {
-        let bytes = iter.next().unwrap();
-        // let char = u16::from_be_bytes([bytes[1], bytes[0]]);
-    }
-
-    for bytes in iter {
-        let token_id = u16::from_be_bytes([bytes[1], bytes[0]]);
-        dataset.push(token_id.into())
-    }
+    let tokenizer = tokenizer::load_tokenizer(&tokenizer_path);
+    // Check that tokens 
+    // Fix with new dataloader
+    // tokenizer.check(&dataset);
 
     // Build inputs and target
-    let mut inputs = Vec::new();
-    let mut targets = Vec::new();
-    for i in 0..(dataset.len() - 1) {
-        inputs.push(dataset[i]);
-        targets.push(dataset[i + 1]);
-    }
-    println!("Dataset length: {}", inputs.len());
+    // Avoid to load everything directly
+    // println!("Dataset length: {}", inputs.len());
 
-    let tokenizer = load_tokenizer(&tokenizer_path);
-    tokenizer.check(dataset);
+    let mut train_dataloader = dataloader::create_dataloader(train_data_path, B, T);
+    println!("Load train dataloader with {} tokens", train_dataloader.len);
+    let mut val_dataloader = dataloader::create_dataloader(val_data_path, B, T);
+    println!("Load val dataloader with {} tokens", train_dataloader.len);
 
     // Decode the dataset
     // let text = tokenizer.batch_decode(&targets);
     // println!("Text {}", text);
-
-    let B: usize = 1;
-    let T: usize = 64;
-    let temperature: f32 = 0.1;
-    let tokens_to_sample: usize = 10;
 
     let mut gpt = load_model(&model_path, B, T);
 
@@ -874,19 +836,41 @@ fn main() {
     // let targets_batch = targets[0..B*T];
 
     // Sample N tokens
-    let batch_inputs = inputs[0..B * T].to_vec();
+    // let batch_inputs = inputs[0..B * T].to_vec();
     // gpt.generate(batch_inputs, tokens_to_sample, temperature, &tokenizer);
 
-    // TODO: code for batching inputs and targets
-    let n_inputs = inputs.len() / T;
-    println!("Number of inputs {}", n_inputs);
-    for (i, n) in (0..n_inputs).step_by(B).enumerate() {
-        let start_idx = n * T;
-        let end_idx = ((n + B) * T).min(inputs.len());
-        println!("Batch {} - Start {} - End {}", i, start_idx, end_idx);
-        let batch_inputs = &inputs[start_idx..end_idx];
-        let batch_targets = &targets[start_idx..end_idx];
-        gpt.loss(batch_inputs, batch_targets, temperature);
-        break;
+    //todo: code for batching inputs and targets
+    // let n_inputs = inputs.len() / T;
+    // println!("Number of inputs {}", n_inputs);
+    // for (i, n) in (0..n_inputs).step_by(B).enumerate() {
+    //     let start_idx = n * T;
+    //     let end_idx = ((n + B) * T).min(inputs.len());
+    //     println!("Batch {} - Start {} - End {}", i, start_idx, end_idx);
+    //     // Wrong way to batch
+    //     let batch_inputs = &inputs[start_idx..end_idx];
+    //     let batch_targets = &targets[start_idx..end_idx];
+    //     gpt.loss(batch_inputs, batch_targets, temperature);
+    //     break;
+    // }
+
+    // todo: implement the train loop
+    // how inputs are batched ?
+    // implement backward methods
+    // compare loss at first iteration
+
+    for step in 0..40 {
+        // get data batch
+        train_dataloader.next_batch();
+        // forward pass
+        println!("Inputs len: {}", &train_dataloader.inputs.len());
+        let probs: Vec<f32> = gpt.forward(&train_dataloader.inputs, temperature);
+        let loss: f32 = gpt.loss(&probs, &train_dataloader.targets);
+        println!("Loss {} at step {}", loss, step);
+        // zero grad
+        gpt.zero_grad();
+        // backward pass
+        gpt.backward();
+        // update
+        gpt.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step+1);
     }
 }
