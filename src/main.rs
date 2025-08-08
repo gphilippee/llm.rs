@@ -319,51 +319,29 @@ pub struct Config {
     T: usize,
 }
 
-pub struct GPT2 {
-    num_parameters: Option<usize>,
-    num_activations: Option<usize>,
+pub struct GPT2<'a> {
+    num_parameters: usize,
+    num_activations: usize,
     header: [u32; 256],
-    params: Option<ParameterTensors>,
-    grads: Option<ParameterTensors>,
-    acts: Option<ActivationTensors>,
-    param_sizes: Option<[usize; 16]>,
+    params: ParameterTensors<'a>,
+    params_memory: Vec<f32>,
+    param_sizes: [usize; 16],
+    acts: ActivationTensors<'a>,
+    acts_memory: Vec<f32>,
+    act_sizes: [usize; 23],
     config: Config,
-    // gradients of the activations
-    grads_acts: Option<ActivationTensors>,
+    // gradients
+    grads: Option<ParameterTensors<'a>>,
+    grads_memory: Option<Vec<f32>>,
+    grads_acts: Option<ActivationTensors<'a>>,
     grads_acts_memory: Option<Vec<f32>>,
     // memory for adamw
-    params_memory: Option<Vec<f32>>,
-    grads_memory: Option<Vec<f32>>,
-    m_memory: Option<Vec<f32>>,
-    v_memory: Option<Vec<f32>>,
+    m_memory: Vec<f32>,
+    v_memory: Vec<f32>,
 }
 
-impl GPT2 {
-    fn new(header: [u32; 256], config: Config) -> GPT2 {
-        let mut gpt2 = GPT2 {
-            num_parameters: None,
-            num_activations: None,
-            param_sizes: None,
-            params: None,
-            grads: None,
-            acts: None,
-            header: header,
-            config: config,
-            grads_acts: None,
-            grads_acts_memory: None,
-            params_memory: None,
-            grads_memory: None,
-            m_memory: None,
-            v_memory: None,
-        };
-
-        let mut acts = init_activations(&gpt2);
-        gpt2.acts = Some(acts);
-
-        return gpt2;
-    }
-
-    fn forward(&mut self, inputs: &[usize], temperature: f32) -> Vec<f32> {
+impl GPT2<'_> {
+    fn forward(&mut self, inputs: &[usize], temperature: f32) -> Vec<f32>{
         let B: usize = self.config.B;
         let T: usize = self.config.T;
         let V: usize = self.config.vocab_size;
@@ -573,11 +551,11 @@ impl GPT2 {
     }
 
     fn zero_grad(&mut self) {
-        self.grads_acts_memory = Some(vec![0f32; self.num_activations.expect("Number of activations is not set!")]);
-        self.grads_memory = Some(vec![0f32; self.num_parameters.expect("Number of parameters is not set!")])
+        self.grads_acts_memory = Some(vec![0f32; self.num_activations]);
+        self.grads_memory = Some(vec![0f32; self.num_parameters])
     }
 
-    // fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, t: usize) {
+    fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, t: usize) {
     //     // implement adamw algorithm
     //     for i in 0..self.num_parameters.expect("Missing total parameters!") {
     //         let param: f32 = self.params_memory.unwrap()[i];
@@ -597,7 +575,7 @@ impl GPT2 {
     //         //todo: add sqrt on v
     //         self.params_memory.unwrap()[i] -= learning_rate * (m_hat / (v_hat.sqrt() + eps) + weight_decay * param);
     //     }
-    // }
+    }
 }
 
 pub struct ParameterTensors {
@@ -635,12 +613,12 @@ fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
     // Init config
     let config = Config {
         version: model_header[1],
+        max_seq_len: model_header[2] as usize,
         vocab_size: model_header[3] as usize,
-        padded_vocab_size: model_header[7] as usize,
         num_layers: model_header[4] as usize,
         num_heads: model_header[5] as usize,
         channels: model_header[6] as usize,
-        max_seq_len: model_header[2] as usize,
+        padded_vocab_size: model_header[7] as usize,
         B: B,
         T: T,
     };
@@ -722,9 +700,27 @@ fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
         lnfw: matrices[14].clone(),
         lnfb: matrices[15].clone(),
     };
-    drop(matrices);
-    gpt.params = Some(params);
-    gpt
+
+    let mut gpt2 = GPT2 {
+        num_parameters,
+        num_activations,
+        header: model_header,
+        config,
+        params,
+        params_memory,
+        param_sizes,
+        acts,
+        acts_memory,
+        act_sizes,
+        grads_acts: None,
+        grads_acts_memory: None,
+        grads: None,
+        grads_memory: None,
+        m_memory: vec![0f32; num_parameters],
+        v_memory: vec![0f32; num_parameters],
+    };
+    
+    gpt2
 }
 
 fn init_activations(gpt: &mut GPT2) -> ActivationTensors {
