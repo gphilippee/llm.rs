@@ -186,7 +186,7 @@ fn softmax_forward(
     // output (B,T,Vp)
     // Vp is the padded vocab size
     // V is the real vocab size
-    let mut probs: Vec<f32> = Vec::with_capacity(B * T * Vp);
+    let mut probs: Vec<f32> = vec![0f32; B * T * Vp];
     for b in 0..B {
         for t in 0..T {
             let btv = b * T * Vp + t * Vp;
@@ -787,7 +787,7 @@ impl GPT2 {
         let mut token_ids: Vec<usize>;
         if only_last {
             // check only the last
-            token_ids = Vec::with_capacity(B);
+            token_ids = vec![0; B];
             for b in 0..B {
                 let start_idx = b * T * Vp + (T - 1) * Vp;
                 let end_idx = b * T * Vp + T * Vp;
@@ -800,7 +800,7 @@ impl GPT2 {
                 token_ids.push(token_id);
             }
         } else {
-            token_ids = Vec::with_capacity(B * T);
+            token_ids = vec![0; B * T];
             // find the most probable token for each b,t
             for b in 0..B {
                 for t in 0..T {
@@ -849,6 +849,7 @@ impl GPT2 {
                 modified_inputs.remove(b * T);
 
                 if b == 0 {
+                    println!("Sampled token {}", tokens[b]);
                     let token = tokenizer.decode(tokens[b]);
                     print!("{}", token);
                     io::stdout().flush().unwrap();  // Force flush
@@ -859,7 +860,6 @@ impl GPT2 {
     }
 
     fn generate(&mut self, inputs: Vec<usize>, N: usize, temperature: f32, tokenizer: &tokenizer::Tokenizer) {
-        let B = self.config.B;
         let T = self.config.T;
         //TODO: ignore B actually
         let input_text = tokenizer.batch_decode(&inputs[0..T]);
@@ -904,7 +904,7 @@ impl GPT2 {
 }
 
 fn main() {
-    let B: usize = 4;
+    let B: usize = 1;
     let T: usize = 64;
     let temperature: f32 = 1.0;
     let tokens_to_sample: usize = 10;
@@ -912,6 +912,7 @@ fn main() {
     let train_data_path = "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
     let val_data_path = "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
     let model_path = "/Users/gphilippe/dev/llm.c/gpt2_124M.bin";
+    // let model_path = "/Users/gphilippe/dev/llm.c/gpt2_124M_debug_state.bin";
     let tokenizer_path = "/Users/gphilippe/dev/llm.c/gpt2_tokenizer.bin";
 
     let tokenizer = tokenizer::load_tokenizer(&tokenizer_path);
@@ -944,22 +945,9 @@ fn main() {
     // let targets_batch = targets[0..B*T];
 
     // Sample N tokens
-    // let batch_inputs = inputs[0..B * T].to_vec();
-    // gpt.generate(batch_inputs, tokens_to_sample, temperature, &tokenizer);
-
-    //todo: code for batching inputs and targets
-    // let n_inputs = inputs.len() / T;
-    // println!("Number of inputs {}", n_inputs);
-    // for (i, n) in (0..n_inputs).step_by(B).enumerate() {
-    //     let start_idx = n * T;
-    //     let end_idx = ((n + B) * T).min(inputs.len());
-    //     println!("Batch {} - Start {} - End {}", i, start_idx, end_idx);
-    //     // Wrong way to batch
-    //     let batch_inputs = &inputs[start_idx..end_idx];
-    //     let batch_targets = &targets[start_idx..end_idx];
-    //     gpt.loss(batch_inputs, batch_targets, temperature);
-    //     break;
-    // }
+    train_dataloader.next_batch();
+    let batch_inputs = train_dataloader.inputs[0..B * T].to_vec();
+    gpt.generate(batch_inputs, tokens_to_sample, temperature, &tokenizer);
 
     // todo: implement the train loop
     // how inputs are batched ?
