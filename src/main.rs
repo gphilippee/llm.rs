@@ -84,8 +84,8 @@ fn attention_forward(
     // preatt, att (B, NH, T, T)
     // NH = number of heads
     // T = sequence length
-    // output is (B,T,C)
-    let mut output: Vec<f32> = Vec::with_capacity(B * T * C);
+    // output (B,T,C)
+    let mut output: Vec<f32> = vec![0.0; B * T * C];
     let C3 = 3 * C;
     let hs = C / NH; // head size
     let scale = 1.0 / (hs as f32).sqrt();
@@ -94,6 +94,8 @@ fn attention_forward(
         for t in 0..T {
             for h in 0..NH {
                 let query_idx = b * T * C3 + t * C3 + h * hs;
+                let preatt_base = b * NH * T * T + h * T * T + t * T;
+                let att_base = b * NH * T * T + h * T * T + t * T; // att[b, h, t, :]
 
                 // pass1: calculate query dot key and maxval
                 let mut maxval: f32 = f32::MIN;
@@ -110,36 +112,35 @@ fn attention_forward(
                     if val > maxval {
                         maxval = val;
                     }
-                    // TODO: fix
-                    preatt[t2] = val;
+
+                    // preatt[b, h, t, t2]
+                    preatt[preatt_base + t2] = val;
                 }
 
                 // pass2: calcul the exp and keep track of sum
                 let mut expsum: f32 = 0.0;
                 for t2 in 0..t {
-                    let expv = (preatt[t2] - maxval).exp();
+                    let preatt_base = att_base; // same layout as att
+                    let expv = (preatt[preatt_base + t2] - maxval).exp();
                     expsum += expv;
-                    // TODO: fix
-                    att[t2] = expv;
+                    att[att_base + t2] = expv;
                 }
                 let expsum_inv = if expsum == 0.0 { 0.0 } else { 1.0 / expsum };
 
                 // pass3: normalize to get the softmax
                 for t2 in 0..T {
                     if t2 < t {
-                        att[t2] *= expsum_inv;
+                        att[att_base + t2] *= expsum_inv;
                     } else {
-                        att[t2] = 0.0;
+                        att[att_base + t2] = 0.0;
                     }
                 }
-                // pass4: accumulate wieghted values into the output of attention
-                for _ in 0..hs {
-                    output.push(0.0);
-                }
+                // pass4: accumulate weighted values into the output of attention
+                let out_base = b * T * C + t * C + h * hs; // output[b, t, h, :]
                 for t2 in 0..t {
-                    let value_idx = b * T * C3 + t2 * C3 + h * hs + 2 * C;
+                    let value_idx = b * T * C3 + t2 * C3 + h * hs + 2 * C; // + 2*C because it's value
                     for i in 0..hs {
-                        output[i] = att[t2] * inp[value_idx + i];
+                        output[out_base + i] += att[att_base + t2] * inp[value_idx + i];
                     }
                 }
             }
@@ -870,3 +871,4 @@ fn main() {
         gpt.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step+1);
     }
 }
+
