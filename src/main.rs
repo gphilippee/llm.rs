@@ -1,5 +1,5 @@
 use core::f32;
-use std::io::{self, Write};
+use std::{io::{self, Write}, iter::zip};
 
 mod tokenizer;
 mod dataloader;
@@ -308,6 +308,92 @@ pub struct ActivationTensors {
     losses: Vec<f32>,    // (B, T)
 }
 
+impl IntoIterator for ActivationTensors {
+    type Item = Vec<f32>;
+    type IntoIter = std::array::IntoIter<Vec<f32>, 23>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        [
+            self.encoded, 
+            self.ln1, 
+            self.ln1_mean, 
+            self.ln1_rstd, 
+            self.qkv, 
+            self.atty, 
+            self.preatt, 
+            self.att, 
+            self.attproj, 
+            self.residual2, 
+            self.ln2, 
+            self.ln2_mean, 
+            self.ln2_rstd, 
+            self.fch, 
+            self.fch_gelu, 
+            self.fcproj, 
+            self.residual3, 
+            self.lnf, 
+            self.lnf_mean, 
+            self.lnf_rstd, 
+            self.logits, 
+            self.probs, 
+            self.losses
+        ].into_iter()
+    }
+}
+
+pub struct ParameterTensors {
+    wte: Vec<f32>,      // (V, C)
+    wpe: Vec<f32>,      // (maxT, C)
+    ln1w: Vec<f32>,     // (L, C)
+    ln1b: Vec<f32>,     // (L, C)
+    qkvw: Vec<f32>,     // (L, 3*C, C)
+    qkvb: Vec<f32>,     // (L, 3*C)
+    attprojw: Vec<f32>, // (L, C, C)
+    attprojb: Vec<f32>, // (L, C)
+    ln2w: Vec<f32>,     // (L, C)
+    ln2b: Vec<f32>,     // (L, C)
+    fcw: Vec<f32>,      // (L, 4*C, C)
+    fcb: Vec<f32>,      // (L, 4*C)
+    fcprojw: Vec<f32>,  // (L, C, 4*C)
+    fcprojb: Vec<f32>,  // (L, C)
+    lnfw: Vec<f32>,     // (C)
+    lnfb: Vec<f32>,     // (C)
+}
+
+// Allow iterating mutably over parameter tensors without moving them,
+// yielding each parameter vector as a mutable reference for in-place updates.
+impl<'a> IntoIterator for &'a mut ParameterTensors {
+    type Item = &'a mut Vec<f32>;
+    type IntoIter = std::array::IntoIter<&'a mut Vec<f32>, 16>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let ParameterTensors {
+            wte,
+            wpe,
+            ln1w,
+            ln1b,
+            qkvw,
+            qkvb,
+            attprojw,
+            attprojb,
+            ln2w,
+            ln2b,
+            fcw,
+            fcb,
+            fcprojw,
+            fcprojb,
+            lnfw,
+            lnfb,
+        } = self;
+
+        [
+            wte, wpe, ln1w, ln1b, qkvw, qkvb, attprojw, attprojb, ln2w, ln2b,
+            fcw, fcb, fcprojw, fcprojb, lnfw, lnfb,
+        ]
+        .into_iter()
+    }
+}
+
 pub struct Config {
     vocab_size: usize,
     padded_vocab_size: usize,
@@ -320,28 +406,258 @@ pub struct Config {
     T: usize,
 }
 
-pub struct GPT2<'a> {
+fn init_params(sizes: [usize; 16]) -> ParameterTensors {
+    ParameterTensors {
+        wte: vec![0.0; sizes[0]],
+        wpe: vec![0.0; sizes[1]],
+        ln1w: vec![0.0; sizes[2]],
+        ln1b: vec![0.0; sizes[3]],
+        qkvw: vec![0.0; sizes[4]],
+        qkvb: vec![0.0; sizes[5]],
+        attprojw: vec![0.0; sizes[6]],
+        attprojb: vec![0.0; sizes[7]],
+        ln2w: vec![0.0; sizes[8]],
+        ln2b: vec![0.0; sizes[9]],
+        fcw: vec![0.0; sizes[10]],
+        fcb: vec![0.0; sizes[11]],
+        fcprojw: vec![0.0; sizes[12]],
+        fcprojb: vec![0.0; sizes[13]],
+        lnfw: vec![0.0; sizes[14]],
+        lnfb: vec![0.0; sizes[15]],
+    }
+}
+
+fn init_acts(sizes: [usize; 23]) -> ActivationTensors {
+    ActivationTensors {
+        encoded: vec![0.0; sizes[0]],
+        ln1: vec![0.0; sizes[1]],
+        ln1_mean: vec![0.0; sizes[2]],
+        ln1_rstd: vec![0.0; sizes[3]],
+        qkv: vec![0.0; sizes[4]],
+        atty: vec![0.0; sizes[5]],
+        preatt: vec![0.0; sizes[6]],
+        att: vec![0.0; sizes[7]],
+        attproj: vec![0.0; sizes[8]],
+        residual2: vec![0.0; sizes[9]],
+        ln2: vec![0.0; sizes[10]],
+        ln2_mean: vec![0.0; sizes[11]],
+        ln2_rstd: vec![0.0; sizes[12]],
+        fch: vec![0.0; sizes[13]],
+        fch_gelu: vec![0.0; sizes[14]],
+        fcproj: vec![0.0; sizes[15]],
+        residual3: vec![0.0; sizes[16]],
+        lnf: vec![0.0; sizes[17]],
+        lnf_mean: vec![0.0; sizes[18]],
+        lnf_rstd: vec![0.0; sizes[19]],
+        logits: vec![0.0; sizes[20]],
+        probs: vec![0.0; sizes[21]],
+        losses: vec![0.0; sizes[22]],
+    }
+}
+
+fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
+    // Load model
+    let bytes = std::fs::read(file).unwrap();
+
+    let mut model_header: [u32; 256] = [0; 256];
+    let mut iter = bytes.chunks_exact(4);
+    for i in 0..256 {
+        let byte_4 = iter.next().unwrap();
+        let double = u32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
+        model_header[i] = double;
+    }
+    // println!("Model header {:?}", model_header);
+
+    // Init config
+    let config = Config {
+        version: model_header[1],
+        max_seq_len: model_header[2] as usize,
+        vocab_size: model_header[3] as usize,
+        num_layers: model_header[4] as usize,
+        num_heads: model_header[5] as usize,
+        channels: model_header[6] as usize,
+        padded_vocab_size: model_header[7] as usize,
+        B: B,
+        T: T,
+    };
+
+    println!("Vocabulary size: {}", config.vocab_size);
+    println!("Padded vocabulary size: {}", config.padded_vocab_size);
+
+    let mut param_sizes = [0; 16];
+
+    let Vp = config.padded_vocab_size;
+    let C = config.channels;
+    let maxT = config.max_seq_len;
+    let L = config.num_layers;
+
+    param_sizes[0] = Vp * C; // wte
+    param_sizes[1] = maxT * C; // wpe
+    param_sizes[2] = L * C; // ln1w
+    param_sizes[3] = L * C; // ln1b
+    param_sizes[4] = L * (3 * C) * C; // qkvw
+    param_sizes[5] = L * (3 * C); // qkvb
+    param_sizes[6] = L * C * C; // attprojw
+    param_sizes[7] = L * C; // attprojb
+    param_sizes[8] = L * C; // ln2w
+    param_sizes[9] = L * C; // ln2b
+    param_sizes[10] = L * (4 * C) * C; // fcw
+    param_sizes[11] = L * (4 * C); // fcb
+    param_sizes[12] = L * C * (4 * C); // fcprojw
+    param_sizes[13] = L * C; // fcprojb
+    param_sizes[14] = C; // lnfw
+    param_sizes[15] = C; // lnfb
+
+    // println!("{:?}", param_sizes);
+
+    // Total parameters
+    let mut num_parameters: usize = 0;
+    for n_params in param_sizes {
+        num_parameters += n_params;
+    }
+    println!("Total parameters: {}M", num_parameters as u32 / 10u32.pow(6));
+
+    let mut matrices = Vec::new();
+    for size in param_sizes.iter() {
+        let mut i: usize = 0;
+        let mut matrix: Vec<f32> = vec![0f32; *size];
+        while i < *size {
+            let byte_4 = iter.next().unwrap();
+            let double = f32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
+            matrix[i] = double;
+            i += 1;
+        }
+        matrices.push(matrix);
+        // println!("{}", i);
+    }
+
+    let params = ParameterTensors {
+        wte: matrices[0].clone(),
+        wpe: matrices[1].clone(),
+        ln1w: matrices[2].clone(),
+        ln1b: matrices[3].clone(),
+        qkvw: matrices[4].clone(),
+        qkvb: matrices[5].clone(),
+        attprojw: matrices[6].clone(),
+        attprojb: matrices[7].clone(),
+        ln2w: matrices[8].clone(),
+        ln2b: matrices[9].clone(),
+        fcw: matrices[10].clone(),
+        fcb: matrices[11].clone(),
+        fcprojw: matrices[12].clone(),
+        fcprojb: matrices[13].clone(),
+        lnfw: matrices[14].clone(),
+        lnfb: matrices[15].clone(),
+    };
+    drop(matrices);
+
+    let (num_activations, act_sizes) = init_activations(&config);
+
+    let acts = ActivationTensors {
+        encoded: vec![0.0; act_sizes[0]],
+        ln1: vec![0.0; act_sizes[1]],
+        ln1_mean: vec![0.0; act_sizes[2]],
+        ln1_rstd: vec![0.0; act_sizes[3]],
+        qkv: vec![0.0; act_sizes[4]],
+        atty: vec![0.0; act_sizes[5]],
+        preatt: vec![0.0; act_sizes[6]],
+        att: vec![0.0; act_sizes[7]],
+        attproj: vec![0.0; act_sizes[8]],
+        residual2: vec![0.0; act_sizes[9]],
+        ln2: vec![0.0; act_sizes[10]],
+        ln2_mean: vec![0.0; act_sizes[11]],
+        ln2_rstd: vec![0.0; act_sizes[12]],
+        fch: vec![0.0; act_sizes[13]],
+        fch_gelu: vec![0.0; act_sizes[14]],
+        fcproj: vec![0.0; act_sizes[15]],
+        residual3: vec![0.0; act_sizes[16]],
+        lnf: vec![0.0; act_sizes[17]],
+        lnf_mean: vec![0.0; act_sizes[18]],
+        lnf_rstd: vec![0.0; act_sizes[19]],
+        logits: vec![0.0; act_sizes[20]],
+        probs: vec![0.0; act_sizes[21]],
+        losses: vec![0.0; act_sizes[22]],
+    };
+
+    let gpt2 = GPT2 {
+        num_parameters,
+        num_activations,
+        header: model_header,
+        config,
+        params,
+        param_sizes,
+        acts,
+        act_sizes,
+        grads_acts: init_acts(act_sizes),
+        grads: init_params(param_sizes),
+        m_memory: vec![0f32; num_parameters],
+        v_memory: vec![0f32; num_parameters],
+    };
+    
+    gpt2
+}
+
+fn init_activations(config: &Config) -> (usize, [usize; 23]) {
+    // Activations
+    let mut act_sizes = [0; 23];
+    let B: usize = config.B; // batch size
+    let T: usize = config.T; // seq_len
+    let C: usize = config.channels;
+    let NH: usize = config.num_heads;
+    let L: usize = config.num_layers;
+    let Vp: usize = config.padded_vocab_size;
+
+    act_sizes[0] = B * T * C; // encoded
+    act_sizes[1] = L * B * T * C; // ln1
+    act_sizes[2] = L * B * T; // ln1_mean
+    act_sizes[3] = L * B * T; // ln1_rstd
+    act_sizes[4] = L * B * T * 3 * C; // qkv
+    act_sizes[5] = L * B * T * C; // atty
+    act_sizes[6] = L * B * NH * T * T; // preatt
+    act_sizes[7] = L * B * NH * T * T; // att
+    act_sizes[8] = L * B * T * C; // attproj
+    act_sizes[9] = L * B * T * C; // residual2
+    act_sizes[10] = L * B * T * C; // ln2
+    act_sizes[11] = L * B * T; // ln2_mean
+    act_sizes[12] = L * B * T; // ln2_rstd
+    act_sizes[13] = L * B * T * 4 * C; // fch
+    act_sizes[14] = L * B * T * 4 * C; // fch_gelu
+    act_sizes[15] = L * B * T * C; // fcproj
+    act_sizes[16] = L * B * T * C; // residual3
+    act_sizes[17] = B * T * C; // lnf
+    act_sizes[18] = B * T; // lnf_mean
+    act_sizes[19] = B * T; // lnf_rstd
+    act_sizes[20] = B * T * Vp; // logits
+    act_sizes[21] = B * T * Vp; // probs
+    act_sizes[22] = B * T; // losses
+
+    let mut num_activations = 0;
+    for size in act_sizes {
+        num_activations += size;
+    }
+    println!("Total activations: {}M", num_activations / 10usize.pow(6));
+
+    (num_activations, act_sizes)
+}
+
+pub struct GPT2 {
     num_parameters: usize,
     num_activations: usize,
     header: [u32; 256],
-    params: ParameterTensors<'a>,
-    params_memory: Vec<f32>,
-    param_sizes: [usize; 16],
-    acts: ActivationTensors<'a>,
-    acts_memory: Vec<f32>,
-    act_sizes: [usize; 23],
     config: Config,
+    params: ParameterTensors,
+    param_sizes: [usize; 16],
+    acts: ActivationTensors,
+    act_sizes: [usize; 23],
     // gradients
-    grads: Option<ParameterTensors<'a>>,
-    grads_memory: Option<Vec<f32>>,
-    grads_acts: Option<ActivationTensors<'a>>,
-    grads_acts_memory: Option<Vec<f32>>,
+    grads: ParameterTensors,
+    grads_acts: ActivationTensors,
     // memory for adamw
     m_memory: Vec<f32>,
     v_memory: Vec<f32>,
 }
 
-impl GPT2<'_> {
+impl GPT2 {
     fn forward(&mut self, inputs: &[usize], temperature: f32) -> Vec<f32>{
         let B: usize = self.config.B;
         let T: usize = self.config.T;
@@ -351,8 +667,8 @@ impl GPT2<'_> {
         let NH: usize = self.config.num_heads;
         let C: usize = self.config.channels;
 
-        let mut acts = self.acts.as_mut().unwrap();
-        let params = self.params.as_ref().unwrap();
+        let acts = &mut self.acts;
+        let params = &mut self.params;
 
         // forward pass
         let mut residual: &[f32];
@@ -432,7 +748,7 @@ impl GPT2<'_> {
         let Vp: usize = self.config.padded_vocab_size;
         let V: usize = self.config.vocab_size;
         let T: usize = self.config.T;
-        let mut acts = self.acts.as_mut().unwrap();
+        let acts = &mut self.acts;
         acts.losses = crossentropy_forward(&probs, targets, B, T, Vp);
         let mut mean_loss: f32 = 0.0;
         for loss in &acts.losses {
@@ -552,243 +868,38 @@ impl GPT2<'_> {
     }
 
     fn zero_grad(&mut self) {
-        self.grads_acts_memory = Some(vec![0f32; self.num_activations]);
-        self.grads_memory = Some(vec![0f32; self.num_parameters])
+        self.grads_acts = init_acts(self.act_sizes);
+        self.grads = init_params(self.param_sizes);
     }
 
     fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, t: usize) {
-    //     // implement adamw algorithm
-    //     for i in 0..self.num_parameters.expect("Missing total parameters!") {
-    //         let param: f32 = self.params_memory.unwrap()[i];
-    //         // Get gradients w.r.t. stochastic objective at timestep t
-    //         let grad: f32 = self.grads_memory.unwrap()[i];
-    //         // Update biased first moment estimate
-    //         let m: f32 = beta1 * self.m_memory.unwrap()[i] + (1.0 - beta1) * grad;
-    //         // Update biased second raw moment estimate
-    //         let v: f32 = beta2 * self.v_memory.unwrap()[i] + (1.0 - beta2) * grad.powi(2);
-    //         // Compute bias-corrected first moment estimate
-    //         let m_hat: f32 = m / (1.0 - beta1);
-    //         // Compute bias-corrected second raw moment estimate
-    //         let v_hat: f32 = v / (1.0 - beta2);
-    //         // Update parameters
-    //         self.m_memory.unwrap()[i] = m;
-    //         self.v_memory.unwrap()[i] = v;
-    //         //todo: add sqrt on v
-    //         self.params_memory.unwrap()[i] -= learning_rate * (m_hat / (v_hat.sqrt() + eps) + weight_decay * param);
-    //     }
-    }
-}
 
-pub struct ParameterTensors {
-    wte: Vec<f32>,      // (V, C)
-    wpe: Vec<f32>,      // (maxT, C)
-    ln1w: Vec<f32>,     // (L, C)
-    ln1b: Vec<f32>,     // (L, C)
-    qkvw: Vec<f32>,     // (L, 3*C, C)
-    qkvb: Vec<f32>,     // (L, 3*C)
-    attprojw: Vec<f32>, // (L, C, C)
-    attprojb: Vec<f32>, // (L, C)
-    ln2w: Vec<f32>,     // (L, C)
-    ln2b: Vec<f32>,     // (L, C)
-    fcw: Vec<f32>,      // (L, 4*C, C)
-    fcb: Vec<f32>,      // (L, 4*C)
-    fcprojw: Vec<f32>,  // (L, C, 4*C)
-    fcprojb: Vec<f32>,  // (L, C)
-    lnfw: Vec<f32>,     // (C)
-    lnfb: Vec<f32>,     // (C)
-}
-
-fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
-    // Load model
-    let bytes = std::fs::read(file).unwrap();
-
-    let mut model_header: [u32; 256] = [0; 256];
-    let mut iter = bytes.chunks_exact(4);
-    for i in 0..256 {
-        let byte_4 = iter.next().unwrap();
-        let double = u32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
-        model_header[i] = double;
-    }
-    // println!("Model header {:?}", model_header);
-
-    // Init config
-    let config = Config {
-        version: model_header[1],
-        max_seq_len: model_header[2] as usize,
-        vocab_size: model_header[3] as usize,
-        num_layers: model_header[4] as usize,
-        num_heads: model_header[5] as usize,
-        channels: model_header[6] as usize,
-        padded_vocab_size: model_header[7] as usize,
-        B: B,
-        T: T,
-    };
-
-    println!("Vocabulary size: {}", config.vocab_size);
-    println!("Padded vocabulary size: {}", config.padded_vocab_size);
-
-    let mut gpt = GPT2::new(model_header, config);
-
-    let mut param_sizes = [0; 16];
-
-    let Vp = gpt.config.padded_vocab_size;
-    let C = gpt.config.channels;
-    let maxT = gpt.config.max_seq_len;
-    let L = gpt.config.num_layers;
-
-    param_sizes[0] = Vp * C; // wte
-    param_sizes[1] = maxT * C; // wpe
-    param_sizes[2] = L * C; // ln1w
-    param_sizes[3] = L * C; // ln1b
-    param_sizes[4] = L * (3 * C) * C; // qkvw
-    param_sizes[5] = L * (3 * C); // qkvb
-    param_sizes[6] = L * C * C; // attprojw
-    param_sizes[7] = L * C; // attprojb
-    param_sizes[8] = L * C; // ln2w
-    param_sizes[9] = L * C; // ln2b
-    param_sizes[10] = L * (4 * C) * C; // fcw
-    param_sizes[11] = L * (4 * C); // fcb
-    param_sizes[12] = L * C * (4 * C); // fcprojw
-    param_sizes[13] = L * C; // fcprojb
-    param_sizes[14] = C; // lnfw
-    param_sizes[15] = C; // lnfb
-    gpt.param_sizes = Some(param_sizes);
-
-    // println!("{:?}", param_sizes);
-
-    // Total parameters
-    let mut num_parameters: usize = 0;
-    for n_params in param_sizes {
-        num_parameters += n_params;
-    }
-    println!("Total parameters: {}M", num_parameters as u32 / 10u32.pow(6));
-    gpt.num_parameters = Some(num_parameters);
-
-    // Init 1st and 2nd moments
-    gpt.params_memory = Some(vec![0f32; num_parameters]);
-    gpt.m_memory = Some(vec![0f32; num_parameters]);
-    gpt.v_memory = Some(vec![0f32; num_parameters]);
-
-    let mut matrices = Vec::new();
-    for size in param_sizes.iter() {
+        // implement adamw algorithm
+        let GPT2 { params, grads, m_memory, v_memory, .. } = self;
         let mut i: usize = 0;
-        let mut matrix: Vec<f32> = vec![0f32; *size];
-        while i < *size {
-            let byte_4 = iter.next().unwrap();
-            let double = f32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
-            matrix[i] = double;
-            i += 1;
+
+        for (param_vec, grad_vec) in zip(params, grads) {
+            for (param, grad) in zip(param_vec.iter_mut(), grad_vec.iter()) {
+                // Update biased first moment estimate
+                let m: f32 = beta1 * m_memory[i] + (1.0 - beta1) * *grad;
+                // Update biased second raw moment estimate
+                let v: f32 = beta2 * v_memory[i] + (1.0 - beta2) * (*grad * *grad);
+                // Compute bias-corrected estimates (simple form)
+                let m_hat: f32 = m / (1.0 - beta1);
+                // Compute bias-corrected second raw moment estimate
+                let v_hat: f32 = v / (1.0 - beta2);
+
+                // Persist optimizer state
+                m_memory[i] = m;
+                v_memory[i] = v;
+
+                // AdamW parameter update
+                *param -= learning_rate
+                    * (m_hat / (v_hat.sqrt() + eps) + weight_decay * *param);
+
+                i += 1;
+            }
         }
-        matrices.push(matrix);
-        // println!("{}", i);
-    }
-
-    let params = ParameterTensors {
-        wte: matrices[0].clone(),
-        wpe: matrices[1].clone(),
-        ln1w: matrices[2].clone(),
-        ln1b: matrices[3].clone(),
-        qkvw: matrices[4].clone(),
-        qkvb: matrices[5].clone(),
-        attprojw: matrices[6].clone(),
-        attprojb: matrices[7].clone(),
-        ln2w: matrices[8].clone(),
-        ln2b: matrices[9].clone(),
-        fcw: matrices[10].clone(),
-        fcb: matrices[11].clone(),
-        fcprojw: matrices[12].clone(),
-        fcprojb: matrices[13].clone(),
-        lnfw: matrices[14].clone(),
-        lnfb: matrices[15].clone(),
-    };
-
-    let mut gpt2 = GPT2 {
-        num_parameters,
-        num_activations,
-        header: model_header,
-        config,
-        params,
-        params_memory,
-        param_sizes,
-        acts,
-        acts_memory,
-        act_sizes,
-        grads_acts: None,
-        grads_acts_memory: None,
-        grads: None,
-        grads_memory: None,
-        m_memory: vec![0f32; num_parameters],
-        v_memory: vec![0f32; num_parameters],
-    };
-    
-    gpt2
-}
-
-fn init_activations(gpt: &mut GPT2) -> ActivationTensors {
-    // Activations
-    let mut act_sizes = [0; 23];
-    let B: usize = gpt.config.B; // batch size
-    let T: usize = gpt.config.T; // seq_len
-    let C: usize = gpt.config.channels;
-    let NH: usize = gpt.config.num_heads;
-    let L: usize = gpt.config.num_layers;
-    let Vp: usize = gpt.config.padded_vocab_size;
-
-    act_sizes[0] = B * T * C; // encoded
-    act_sizes[1] = L * B * T * C; // ln1
-    act_sizes[2] = L * B * T; // ln1_mean
-    act_sizes[3] = L * B * T; // ln1_rstd
-    act_sizes[4] = L * B * T * 3 * C; // qkv
-    act_sizes[5] = L * B * T * C; // atty
-    act_sizes[6] = L * B * NH * T * T; // preatt
-    act_sizes[7] = L * B * NH * T * T; // att
-    act_sizes[8] = L * B * T * C; // attproj
-    act_sizes[9] = L * B * T * C; // residual2
-    act_sizes[10] = L * B * T * C; // ln2
-    act_sizes[11] = L * B * T; // ln2_mean
-    act_sizes[12] = L * B * T; // ln2_rstd
-    act_sizes[13] = L * B * T * 4 * C; // fch
-    act_sizes[14] = L * B * T * 4 * C; // fch_gelu
-    act_sizes[15] = L * B * T * C; // fcproj
-    act_sizes[16] = L * B * T * C; // residual3
-    act_sizes[17] = B * T * C; // lnf
-    act_sizes[18] = B * T; // lnf_mean
-    act_sizes[19] = B * T; // lnf_rstd
-    act_sizes[20] = B * T * Vp; // logits
-    act_sizes[21] = B * T * Vp; // probs
-    act_sizes[22] = B * T; // losses
-
-    let mut num_activations = 0;
-    for size in act_sizes {
-        num_activations += size;
-    }
-    gpt.num_activations = Some(num_activations);
-    println!("Total activations: {}M", num_activations / 10usize.pow(6));
-
-    ActivationTensors {
-        encoded: vec![0.0; act_sizes[0]],
-        ln1: vec![0.0; act_sizes[1]],
-        ln1_mean: vec![0.0; act_sizes[2]],
-        ln1_rstd: vec![0.0; act_sizes[3]],
-        qkv: vec![0.0; act_sizes[4]],
-        atty: vec![0.0; act_sizes[5]],
-        preatt: vec![0.0; act_sizes[6]],
-        att: vec![0.0; act_sizes[7]],
-        attproj: vec![0.0; act_sizes[8]],
-        residual2: vec![0.0; act_sizes[9]],
-        ln2: vec![0.0; act_sizes[10]],
-        ln2_mean: vec![0.0; act_sizes[11]],
-        ln2_rstd: vec![0.0; act_sizes[12]],
-        fch: vec![0.0; act_sizes[13]],
-        fch_gelu: vec![0.0; act_sizes[14]],
-        fcproj: vec![0.0; act_sizes[15]],
-        residual3: vec![0.0; act_sizes[16]],
-        lnf: vec![0.0; act_sizes[17]],
-        lnf_mean: vec![0.0; act_sizes[18]],
-        lnf_rstd: vec![0.0; act_sizes[19]],
-        logits: vec![0.0; act_sizes[20]],
-        probs: vec![0.0; act_sizes[21]],
-        losses: vec![0.0; act_sizes[22]],
     }
 }
 
