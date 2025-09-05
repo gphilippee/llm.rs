@@ -301,11 +301,7 @@ fn softmax_forward(
                 sum += f32::exp(logits[btv + v] / temperature);
             }
             for v in 0..V {
-                probs.push(f32::exp(logits[btv + v] / temperature) / sum);
-            }
-            // Pad probabilities
-            for _ in V..Vp {
-                probs.push(0f32);
+                probs[btv + v] = f32::exp(logits[btv + v] / temperature) / sum;
             }
         }
     }
@@ -958,7 +954,7 @@ impl GPT2 {
         );
         acts.logits = matmul_forward(&acts.lnf, &params.wte, None, B, T, C, Vp);
         acts.probs = softmax_forward(&acts.logits, B, T, V, Vp, temperature);
-        // output is (B,T,V)
+        // output is (B,T,Vp)
         return acts.probs.clone();
     }
 
@@ -1108,14 +1104,14 @@ impl GPT2 {
             token_ids = vec![0; B];
             for b in 0..B {
                 let start_idx = b * T * Vp + (T - 1) * Vp;
-                let end_idx = b * T * Vp + T * Vp;
+                let end_idx = (b + 1) * T * Vp;
                 let token_id = probs[start_idx..end_idx]
                     .iter()
                     .enumerate()
                     .max_by(|(_, x), (_, y)| x.partial_cmp(y).expect("Partial comparison paniced"))
                     .map(|(index, _)| index)
                     .expect("No index was found");
-                token_ids.push(token_id);
+                token_ids[b] = token_id;
             }
         } else {
             token_ids = vec![0; B * T];
@@ -1132,7 +1128,7 @@ impl GPT2 {
                         })
                         .map(|(index, _)| index)
                         .expect("No index was found");
-                    token_ids.push(token_id);
+                    token_ids[b * T + t] = token_id;
                 }
             }
         }
@@ -1158,7 +1154,7 @@ impl GPT2 {
             // inputs is (1,T)
             // println!("Inputs {:?}", modified_inputs);
 
-            // probs is (B, T, V)
+            // probs is (B, T, Vp)
             let probs: Vec<f32> = self.forward(&modified_inputs, temperature);
 
             // (B) due to only_last=true
@@ -1173,7 +1169,7 @@ impl GPT2 {
                 modified_inputs.remove(b * T);
 
                 if b == 0 {
-                    println!("Sampled token {}", tokens[b]);
+                    // println!("Sampled token {}", tokens[b]);
                     let token = tokenizer.decode(tokens[b]);
                     print!("{}", token);
                     io::stdout().flush().unwrap(); // Force flush
