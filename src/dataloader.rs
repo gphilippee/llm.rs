@@ -6,20 +6,19 @@ pub struct DataLoader {
     T: usize, // sentence length
     pub inputs: Vec<usize>,
     pub targets: Vec<usize>,
-
 }
 
 impl DataLoader {
-    pub fn new(dataset: Vec<usize>, B: usize, T: usize) -> DataLoader{
+    pub fn new(dataset: Vec<usize>, B: usize, T: usize) -> DataLoader {
         let len = dataset.len();
-        DataLoader { 
+        DataLoader {
             dataset,
             curr_idx: 0,
             len,
             B,
             T,
             inputs: Vec::new(),
-            targets: Vec::new()
+            targets: Vec::new(),
         }
         //todo: implement random batch
     }
@@ -41,7 +40,10 @@ impl DataLoader {
         self.targets = Vec::new();
 
         let end: usize = self.curr_idx + self.T * self.B;
-        println!("Loading data between {} and {} included", self.curr_idx, end);
+        println!(
+            "Loading data between {} and {} included",
+            self.curr_idx, end
+        );
 
         for i in self.curr_idx..end {
             self.inputs.push(self.dataset[i]);

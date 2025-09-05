@@ -1,8 +1,11 @@
 use core::f32;
-use std::{io::{self, Write}, iter::zip};
+use std::{
+    io::{self, Write},
+    iter::zip,
+};
 
-mod tokenizer;
 mod dataloader;
+mod tokenizer;
 
 // T = sequence_length
 // B = batch_size
@@ -19,6 +22,7 @@ fn matmul_forward(
     C: usize,
     OC: usize,
 ) -> Vec<f32> {
+    // input (B,T,C)
     // output (B,T,OC)
     let mut output = Vec::with_capacity(B * T * OC);
     for b in 0..B {
@@ -41,26 +45,69 @@ fn matmul_forward(
     output
 }
 
-fn fast_matmul_forward(
-    input: &[f32],
+fn matmul_backward(
+    dout: &[f32],
+    inp: &[f32],
     weight: &[f32],
-    bias: Option<&[f32]>,
     B: usize,
     T: usize,
     C: usize,
-    O: usize,
-) {
-    //todo: implement
+    OC: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    // weight (OC, C)
+    // bias (OC)
+    // dout (B, T, OC)
+    // inp (B, T, C)
+    let mut dinp = vec![0f32; B * T * C];
+    let mut dweight = vec![0f32; OC * C];
+    let mut dbias = vec![0f32; OC];
+
+    for b in 0..B {
+        for t in 0..T {
+            let btc = b * T * C + t * C;
+            let btoc = b * T * OC + t * OC;
+
+            for o in 0..OC {
+                // gradient contribution to bias
+                dbias[o] += dout[btoc + o];
+                for c in 0..C {
+                    // gradient contribution to weight
+                    dweight[o * C + c] += inp[btc + c] * dout[btoc + o];
+                    // gradient contribution to input
+                    dinp[btc + c] += weight[o * C + c] * dout[btoc + o];
+                }
+            }
+        }
+    }
+    (dinp, dweight, dbias)
 }
 
 fn gelu_forward(input: &[f32], N: usize) -> Vec<f32> {
     let mut output: Vec<f32> = Vec::with_capacity(N);
+    let scaling_factor = f32::sqrt(2.0 / f32::consts::PI);
     for i in 0..N {
         let x = input[i];
         let cube = 0.44715 * x * x * x;
-        output.push(0.5 * x * (1.0 + f32::tanh(f32::sqrt(2.0 / f32::consts::PI) * (x + cube))))
+        output.push(0.5 * x * (1.0 + f32::tanh(scaling_factor * (x + cube))))
     }
     output
+}
+
+fn gelu_backward(dout: &[f32], input: &[f32], N: usize) -> Vec<f32> {
+    let mut dinp = vec![0f32; N];
+    let scaling_factor = f32::sqrt(2.0 / f32::consts::PI);
+    for i in 0..N {
+        let x = input[i];
+        let cube = 0.44715 * x * x * x;
+        let tanh_arg = scaling_factor * (x + cube);
+        let tanh_out = f32::tanh(tanh_arg);
+        let coshf_out = f32::cosh(tanh_arg);
+        let sech_out = 1.0 / (coshf_out * coshf_out);
+        let local_grad = 0.5 * (1.0 + tanh_out)
+            + x * 0.5 * sech_out * scaling_factor * (1.0 + 3.0 * 0.044715 * x * x);
+        dinp[i] += local_grad * dout[i]
+    }
+    dinp
 }
 
 fn residual_forward(input1: &[f32], input2: &[f32], N: usize) -> Vec<f32> {
@@ -69,6 +116,16 @@ fn residual_forward(input1: &[f32], input2: &[f32], N: usize) -> Vec<f32> {
         output.push(input1[i] + input2[i])
     }
     output
+}
+
+fn residual_backward(dout: &[f32], N: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut dinp1: Vec<f32> = Vec::with_capacity(N);
+    let mut dinp2: Vec<f32> = Vec::with_capacity(N);
+    for i in 0..N {
+        dinp1.push(dout[i]);
+        dinp2.push(dout[i]);
+    }
+    (dinp1, dinp2)
 }
 
 fn attention_forward(
@@ -120,7 +177,6 @@ fn attention_forward(
                 // pass2: calcul the exp and keep track of sum
                 let mut expsum: f32 = 0.0;
                 for t2 in 0..t {
-                    let preatt_base = att_base; // same layout as att
                     let expv = (preatt[preatt_base + t2] - maxval).exp();
                     expsum += expv;
                     att[att_base + t2] = expv;
@@ -129,7 +185,7 @@ fn attention_forward(
 
                 // pass3: normalize to get the softmax
                 for t2 in 0..T {
-                    if t2 < t {
+                    if t2 <= t {
                         att[att_base + t2] *= expsum_inv;
                     } else {
                         att[att_base + t2] = 0.0;
@@ -149,6 +205,25 @@ fn attention_forward(
     output
 }
 
+fn attention_backward(
+    dout: &[f32],
+    inp: &[f32],
+    att: &[f32],
+    B: usize,
+    T: usize,
+    C: usize,
+    NH: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    // inp (B, T, 3C)
+    // dout (B, T, C)
+    // preatt, att (B, NH, T, T)
+    let dinp = vec![0f32; B * T * C];
+    let dpreatt = vec![0f32; B * NH * T * T];
+    let datt = vec![0f32; B * NH * T * T];
+    //todo: implement
+    (dinp, dpreatt, datt)
+}
+
 fn encoder_forward(
     input: &[usize],
     wte: &[f32],
@@ -157,7 +232,8 @@ fn encoder_forward(
     T: usize,
     C: usize,
 ) -> Vec<f32> {
-    // input (B,T,C)
+    // input (B,T)
+    // output (B,T,C)
     // wte (V,C): weight token embedding
     // V is vocabulary size
     // wpe (maxT, C): weight positional embedding
@@ -172,6 +248,36 @@ fn encoder_forward(
         }
     }
     output
+}
+
+fn encoder_backward(
+    dout: &[f32],
+    input: &[usize],
+    B: usize,
+    T: usize,
+    C: usize,
+    V: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    // input (B, T)
+    // dout (B,T,C)
+    // wte (V,C): weight token embedding
+    // V is vocabulary size
+    // wpe (maxT, C): weight positional embedding
+    let mut dwte = vec![0f32; V * C];
+    let mut dwpe = vec![0f32; V * C];
+
+    for b in 0..B {
+        for t in 0..T {
+            let token_id = input[b * T + t];
+            let idx = b * T * C + t * C;
+            for c in 0..C {
+                let d = dout[idx + c];
+                dwte[token_id * C + c] += d;
+                dwpe[t * C + c] += d;
+            }
+        }
+    }
+    (dwte, dwpe)
 }
 
 fn softmax_forward(
@@ -224,6 +330,31 @@ fn crossentropy_forward(
         }
     }
     output
+}
+
+fn crossentropy_softmax_backward(
+    dlosses: &[f32],
+    targets: &[usize],
+    probs: &[f32],
+    B: usize,
+    T: usize,
+    V: usize,
+    Vp: usize,
+) -> Vec<f32> {
+    let mut dlogits: Vec<f32> = vec![0f32; B * T * Vp];
+    for b in 0..B {
+        for t in 0..T {
+            let idx = b * T * Vp + t * Vp;
+            let ix = targets[b * T + t];
+            // let padded vocab gradient to 0
+            for i in 0..V {
+                let p = probs[idx + i];
+                let indicator = if i == ix { 1.0 } else { 0.0 };
+                dlogits[idx + i] += (p - indicator) * dlosses[b * T + t];
+            }
+        }
+    }
+    dlogits
 }
 
 fn layernorm_forward(
@@ -281,6 +412,58 @@ fn layernorm_forward(
     output
 }
 
+fn layernorm_backward(
+    dout: &[f32],
+    inp: &[f32],
+    mean: &[f32],
+    rstd: &[f32],
+    weight: &[f32],
+    B: usize,
+    T: usize,
+    C: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    // inp (B,T,C)
+    // dout (B,T,C)
+    // mean and rstd are (B,T)
+    let mut dweight = vec![0f32; C];
+    let mut dbias = vec![0f32; C];
+    let mut dinp = vec![0f32; B * T * C];
+    for b in 0..B {
+        for t in 0..T {
+            let m = mean[b * T + t];
+            let reciprocal_std = rstd[b * T + t];
+            let bt = b * T * C + t * C;
+
+            let mut dnorm_mean = 0f32;
+            let mut dnorm_norm_mean = 0f32;
+            for c in 0..C {
+                let norm_bti = (inp[bt + c] - m) * reciprocal_std;
+                let dnorm_i = weight[c] * dout[bt + c];
+                dnorm_mean += dnorm_i;
+                dnorm_norm_mean += dnorm_i * norm_bti;
+            }
+
+            dnorm_mean = dnorm_mean / C as f32;
+            dnorm_norm_mean = dnorm_norm_mean / C as f32;
+
+            for c in 0..C {
+                let n = reciprocal_std * (inp[bt + c] - m);
+                // gradient contribution to bias
+                dbias[c] += dout[bt + c];
+                // gradient contribution to weight
+                dweight[c] += n * dout[bt + c];
+                // gradient contribution to input
+                let mut dval = 0f32;
+                dval += weight[c] * dout[bt + c]; // term 1
+                dval -= dnorm_mean; // term 2
+                dval -= n * dnorm_norm_mean; // term 3
+                dval *= reciprocal_std; // final scale
+                dinp[bt + c] = dval
+            }
+        }
+    }
+    (dinp, dweight, dbias)
+}
 
 pub struct ActivationTensors {
     encoded: Vec<f32>,   // (B, T, C)
@@ -314,30 +497,31 @@ impl IntoIterator for ActivationTensors {
 
     fn into_iter(self) -> Self::IntoIter {
         [
-            self.encoded, 
-            self.ln1, 
-            self.ln1_mean, 
-            self.ln1_rstd, 
-            self.qkv, 
-            self.atty, 
-            self.preatt, 
-            self.att, 
-            self.attproj, 
-            self.residual2, 
-            self.ln2, 
-            self.ln2_mean, 
-            self.ln2_rstd, 
-            self.fch, 
-            self.fch_gelu, 
-            self.fcproj, 
-            self.residual3, 
-            self.lnf, 
-            self.lnf_mean, 
-            self.lnf_rstd, 
-            self.logits, 
-            self.probs, 
-            self.losses
-        ].into_iter()
+            self.encoded,
+            self.ln1,
+            self.ln1_mean,
+            self.ln1_rstd,
+            self.qkv,
+            self.atty,
+            self.preatt,
+            self.att,
+            self.attproj,
+            self.residual2,
+            self.ln2,
+            self.ln2_mean,
+            self.ln2_rstd,
+            self.fch,
+            self.fch_gelu,
+            self.fcproj,
+            self.residual3,
+            self.lnf,
+            self.lnf_mean,
+            self.lnf_rstd,
+            self.logits,
+            self.probs,
+            self.losses,
+        ]
+        .into_iter()
     }
 }
 
@@ -387,8 +571,8 @@ impl<'a> IntoIterator for &'a mut ParameterTensors {
         } = self;
 
         [
-            wte, wpe, ln1w, ln1b, qkvw, qkvb, attprojw, attprojb, ln2w, ln2b,
-            fcw, fcb, fcprojw, fcprojb, lnfw, lnfb,
+            wte, wpe, ln1w, ln1b, qkvw, qkvb, attprojw, attprojb, ln2w, ln2b, fcw, fcb, fcprojw,
+            fcprojb, lnfw, lnfb,
         ]
         .into_iter()
     }
@@ -515,7 +699,10 @@ fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
     for n_params in param_sizes {
         num_parameters += n_params;
     }
-    println!("Total parameters: {}M", num_parameters as u32 / 10u32.pow(6));
+    println!(
+        "Total parameters: {}M",
+        num_parameters as u32 / 10u32.pow(6)
+    );
 
     let mut matrices = Vec::new();
     for size in param_sizes.iter() {
@@ -593,7 +780,7 @@ fn load_model(file: &str, B: usize, T: usize) -> GPT2 {
         m_memory: vec![0f32; num_parameters],
         v_memory: vec![0f32; num_parameters],
     };
-    
+
     gpt2
 }
 
@@ -658,7 +845,7 @@ pub struct GPT2 {
 }
 
 impl GPT2 {
-    fn forward(&mut self, inputs: &[usize], temperature: f32) -> Vec<f32>{
+    fn forward(&mut self, inputs: &[usize], temperature: f32) -> Vec<f32> {
         let B: usize = self.config.B;
         let T: usize = self.config.T;
         let V: usize = self.config.vocab_size;
@@ -676,60 +863,93 @@ impl GPT2 {
         for l in 0..L {
             // println!("Layer n°{}", l);
             if l == 0 {
-                residual = &acts.encoded;
+                residual = &acts.encoded; // (B, T, C)
             } else {
-                residual = &acts.residual3;
+                residual = &acts.residual3[l * B * T * C..]; // (L, B, T, C)
             }
-            acts.ln1 = layernorm_forward(
-                &mut acts.ln1_mean,
-                &mut acts.ln1_rstd,
+            acts.ln1[l * B * T * C..(l + 1) * B * T * C].copy_from_slice(&layernorm_forward(
+                &mut acts.ln1_mean[l * B * T..],
+                &mut acts.ln1_rstd[l * B * T..],
                 residual,
-                &params.ln1w,
-                &params.ln1b,
+                &params.ln1w[l * C..],
+                &params.ln1b[l * C..],
                 B,
                 T,
                 C,
-            );
-            acts.qkv = matmul_forward(&acts.ln1, &params.qkvw, Some(&params.qkvb), B, T, C, 3 * C);
-            acts.atty = attention_forward(&mut acts.preatt, &mut acts.att, &acts.qkv, B, T, C, NH);
-            acts.attproj = matmul_forward(
-                &acts.atty,
-                &params.attprojw,
-                Some(&params.attprojb),
+            ));
+            acts.qkv[l * B * T * 3 * C..(l + 1) * B * T * 3 * C].copy_from_slice(&matmul_forward(
+                &acts.ln1[l * B * T * C..],
+                &params.qkvw[l * 3 * C * C..],
+                Some(&params.qkvb[l * 3 * C..]),
+                B,
+                T,
+                C,
+                3 * C,
+            ));
+            acts.atty[l * B * T * C..(l + 1) * B * T * C].copy_from_slice(&attention_forward(
+                &mut acts.preatt[l * B * NH * T * T..],
+                &mut acts.att[l * B * NH * T * T..],
+                &acts.qkv[l * B * T * 3 * C..],
+                B,
+                T,
+                C,
+                NH,
+            ));
+            acts.attproj[l * B * T * C..(l + 1) * B * T * C].copy_from_slice(&matmul_forward(
+                &acts.atty[l * B * T * C..],
+                &params.attprojw[l * C * C..],
+                Some(&params.attprojb[l * C..]),
                 B,
                 T,
                 C,
                 C,
-            );
-            acts.residual2 = residual_forward(&residual, &acts.attproj, B * T * C);
-            acts.ln2 = layernorm_forward(
-                &mut acts.ln2_mean,
-                &mut acts.ln2_rstd,
-                &acts.residual2,
-                &params.ln2w,
-                &params.ln2b,
+            ));
+            acts.residual2[l * B * T * C..(l + 1) * B * T * C].copy_from_slice(&residual_forward(
+                &residual,
+                &acts.attproj[l * B * T * C..],
+                B * T * C,
+            ));
+            acts.ln2[l * B * T * C..(l + 1) * B * T * C].copy_from_slice(&layernorm_forward(
+                &mut acts.ln2_mean[l * B * T..],
+                &mut acts.ln2_rstd[l * B * T..],
+                &acts.residual2[l * B * T * C..],
+                &params.ln2w[l * C..],
+                &params.ln2b[l * C..],
                 B,
                 T,
                 C,
-            );
-            acts.fch = matmul_forward(&acts.ln2, &params.fcw, Some(&params.fcb), B, T, C, 4 * C);
-            acts.fch_gelu = gelu_forward(&acts.fch, B * T * 4 * C);
-            acts.fcproj = matmul_forward(
-                &acts.fch_gelu,
-                &params.fcprojw,
-                Some(&params.fcprojb),
+            ));
+            acts.fch[l * B * T * 4 * C..(l + 1) * B * T * 4 * C].copy_from_slice(&matmul_forward(
+                &acts.ln2[l * B * T * C..],
+                &params.fcw[l * 4 * C * C..],
+                Some(&params.fcb[l * 4 * C..]),
+                B,
+                T,
+                C,
+                4 * C,
+            ));
+            acts.fch_gelu[l * B * T * 4 * C..(l + 1) * B * T * 4 * C]
+                .copy_from_slice(&gelu_forward(&acts.fch[l * B * T * 4 * C..], B * T * 4 * C));
+            acts.fcproj[l * B * T * C..(l + 1) * B * T * C].copy_from_slice(&matmul_forward(
+                &acts.fch_gelu[l * B * T * 4 * C..],
+                &params.fcprojw[l * 4 * C * C..],
+                Some(&params.fcprojb[l * C..]),
                 B,
                 T,
                 4 * C,
                 C,
-            );
-            acts.residual3 = residual_forward(&acts.residual2, &acts.fcproj, B * T * C);
+            ));
+            acts.residual3[l * B * T * C..(l + 1) * B * T * C].copy_from_slice(&residual_forward(
+                &acts.residual2[l * B * T * C..],
+                &acts.fcproj[l * B * T * C..],
+                B * T * C,
+            ));
         }
         // println!("Layers applied");
         acts.lnf = layernorm_forward(
             &mut acts.lnf_mean,
             &mut acts.lnf_rstd,
-            &acts.residual3,
+            &acts.residual3[(L - 1) * B * T * C..],
             &params.lnfw,
             &params.lnfb,
             B,
@@ -740,6 +960,108 @@ impl GPT2 {
         acts.probs = softmax_forward(&acts.logits, B, T, V, Vp, temperature);
         // output is (B,T,V)
         return acts.probs.clone();
+    }
+
+    fn backward(&mut self, inputs: &[usize], targets: &[usize]) {
+        let B: usize = self.config.B;
+        let T: usize = self.config.T;
+        let V: usize = self.config.vocab_size;
+        let Vp: usize = self.config.padded_vocab_size;
+        let L: usize = self.config.num_layers;
+        let NH: usize = self.config.num_heads;
+        let C: usize = self.config.channels;
+
+        let acts = &mut self.acts;
+        let params = &mut self.params;
+        let grads_acts = &mut self.grads_acts;
+        let grads = &mut self.grads;
+
+        // Fill with the mean loss
+        let dloss_mean = 1.0 / (B * T) as f32;
+        for i in 0..B * T {
+            grads_acts.losses[i] = dloss_mean;
+        }
+
+        grads_acts.logits =
+            crossentropy_softmax_backward(&grads_acts.losses, targets, &acts.probs, B, T, V, Vp);
+        (grads_acts.lnf, grads.wte, _) =
+            matmul_backward(&grads_acts.logits, &acts.lnf, &params.wte, B, T, C, Vp);
+        (grads_acts.residual3, grads.lnfw, grads.lnfb) = layernorm_backward(
+            &grads_acts.lnf,
+            &acts.residual3,
+            &acts.lnf_mean,
+            &acts.lnf_rstd,
+            &params.lnfw,
+            B,
+            T,
+            C,
+        );
+        let mut residual: &[f32];
+        let mut grads_residual: Vec<f32>;
+        for l in 0..L {
+            (grads_acts.residual2, grads_acts.fcproj) =
+                residual_backward(&grads_acts.residual3, B * T * C);
+            (grads_acts.fch_gelu, grads.fcprojw, grads.fcprojb) = matmul_backward(
+                &grads_acts.fcproj,
+                &acts.fch_gelu,
+                &params.fcprojw,
+                B,
+                T,
+                4 * C,
+                C,
+            );
+            grads_acts.fch = gelu_backward(&grads_acts.fch_gelu, &acts.fch, B * T * 4 * C);
+            (grads_acts.ln2, grads.fcw, grads.fcb) =
+                matmul_backward(&grads_acts.fch, &acts.ln2, &params.fcw, B, T, C, 4 * C);
+            (grads_acts.residual2, grads.ln2w, grads.ln2b) = layernorm_backward(
+                &grads_acts.ln2,
+                &acts.residual2,
+                &acts.ln2_mean,
+                &acts.ln2_rstd,
+                &params.ln2w,
+                B,
+                T,
+                C,
+            );
+            (_, grads_acts.attproj) = residual_backward(&grads_acts.residual2, B * T * C);
+            (grads_acts.atty, grads.attprojw, grads.attprojb) = matmul_backward(
+                &grads_acts.attproj,
+                &acts.atty,
+                &params.attprojw,
+                B,
+                T,
+                C,
+                C,
+            );
+            (grads_acts.atty, grads_acts.preatt, grads_acts.att) =
+                attention_backward(&grads_acts.atty, &acts.att, &acts.qkv, B, T, C, NH);
+            (grads_acts.ln1, grads.qkvw, _) =
+                matmul_backward(&grads_acts.qkv, &acts.ln1, &params.qkvw, B, T, C, 3 * C);
+
+            if l == 0 {
+                residual = &acts.encoded;
+            } else {
+                residual = &acts.residual3;
+            }
+
+            (grads_residual, grads.ln1w, grads.ln1b) = layernorm_backward(
+                &grads_acts.ln1,
+                residual,
+                &acts.ln1_mean,
+                &acts.ln1_rstd,
+                &params.ln1w,
+                B,
+                T,
+                C,
+            );
+
+            if l == 0 {
+                grads_acts.encoded = grads_residual;
+            } else {
+                grads_acts.residual3 = grads_residual;
+            }
+        }
+        (grads.wte, grads.wpe) = encoder_backward(&grads_acts.encoded, inputs, B, T, C, V);
     }
 
     fn loss(&mut self, probs: &[f32], targets: &[usize]) -> f32 {
@@ -768,12 +1090,8 @@ impl GPT2 {
                 );
             }
         }
-        
-        mean_loss
-    }
 
-    fn backward(&self) {
-        //todo: implement backpropagation
+        mean_loss
     }
 
     fn argmax(&self, probs: Vec<f32>, only_last: bool) -> Vec<usize> {
@@ -821,7 +1139,13 @@ impl GPT2 {
         token_ids
     }
 
-    fn sample(&mut self, inputs: Vec<usize>, N: usize, temperature: f32, tokenizer: &tokenizer::Tokenizer) -> Vec<usize> {
+    fn sample(
+        &mut self,
+        inputs: Vec<usize>,
+        N: usize,
+        temperature: f32,
+        tokenizer: &tokenizer::Tokenizer,
+    ) -> Vec<usize> {
         // inputs (B, T)
         // outputs (B, T + N)
         let B = self.config.B;
@@ -852,14 +1176,20 @@ impl GPT2 {
                     println!("Sampled token {}", tokens[b]);
                     let token = tokenizer.decode(tokens[b]);
                     print!("{}", token);
-                    io::stdout().flush().unwrap();  // Force flush
+                    io::stdout().flush().unwrap(); // Force flush
                 }
             }
         }
         outputs
     }
 
-    fn generate(&mut self, inputs: Vec<usize>, N: usize, temperature: f32, tokenizer: &tokenizer::Tokenizer) {
+    fn generate(
+        &mut self,
+        inputs: Vec<usize>,
+        N: usize,
+        temperature: f32,
+        tokenizer: &tokenizer::Tokenizer,
+    ) {
         let T = self.config.T;
         //TODO: ignore B actually
         let input_text = tokenizer.batch_decode(&inputs[0..T]);
@@ -872,10 +1202,23 @@ impl GPT2 {
         self.grads = init_params(self.param_sizes);
     }
 
-    fn update(&mut self, learning_rate: f32, beta1: f32, beta2: f32, eps: f32, weight_decay: f32, t: usize) {
-
+    fn update(
+        &mut self,
+        learning_rate: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        t: usize,
+    ) {
         // implement adamw algorithm
-        let GPT2 { params, grads, m_memory, v_memory, .. } = self;
+        let GPT2 {
+            params,
+            grads,
+            m_memory,
+            v_memory,
+            ..
+        } = self;
         let mut i: usize = 0;
 
         for (param_vec, grad_vec) in zip(params, grads) {
@@ -894,8 +1237,7 @@ impl GPT2 {
                 v_memory[i] = v;
 
                 // AdamW parameter update
-                *param -= learning_rate
-                    * (m_hat / (v_hat.sqrt() + eps) + weight_decay * *param);
+                *param -= learning_rate * (m_hat / (v_hat.sqrt() + eps) + weight_decay * *param);
 
                 i += 1;
             }
@@ -909,14 +1251,16 @@ fn main() {
     let temperature: f32 = 1.0;
     let tokens_to_sample: usize = 10;
 
-    let train_data_path = "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
-    let val_data_path = "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
+    let train_data_path =
+        "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
+    let val_data_path =
+        "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
     let model_path = "/Users/gphilippe/dev/llm.c/gpt2_124M.bin";
     // let model_path = "/Users/gphilippe/dev/llm.c/gpt2_124M_debug_state.bin";
     let tokenizer_path = "/Users/gphilippe/dev/llm.c/gpt2_tokenizer.bin";
 
     let tokenizer = tokenizer::load_tokenizer(&tokenizer_path);
-    // Check that tokens 
+    // Check that tokens
     // Fix with new dataloader
     // tokenizer.check(&dataset);
 
@@ -954,20 +1298,19 @@ fn main() {
     // implement backward methods
     // compare loss at first iteration
 
-    for step in 0..40 {
-        // get data batch
-        train_dataloader.next_batch();
-        // forward pass
-        println!("Inputs len: {}", &train_dataloader.inputs.len());
-        let probs: Vec<f32> = gpt.forward(&train_dataloader.inputs, temperature);
-        let loss: f32 = gpt.loss(&probs, &train_dataloader.targets);
-        println!("Loss {} at step {}", loss, step);
-        // zero grad
-        gpt.zero_grad();
-        // backward pass
-        gpt.backward();
-        // update
-        gpt.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step+1);
-    }
+    // for step in 0..40 {
+    //     // get data batch
+    //     train_dataloader.next_batch();
+    //     // forward pass
+    //     println!("Inputs len: {}", &train_dataloader.inputs.len());
+    //     let probs: Vec<f32> = gpt.forward(&train_dataloader.inputs, temperature);
+    //     let loss: f32 = gpt.loss(&probs, &train_dataloader.targets);
+    //     println!("Loss {} at step {}", loss, step);
+    //     // zero grad
+    //     gpt.zero_grad();
+    //     // backward pass
+    //     gpt.backward(&train_dataloader.inputs, &train_dataloader.targets);
+    //     // update
+    //     gpt.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step+1);
+    // }
 }
-
