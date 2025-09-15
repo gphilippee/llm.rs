@@ -26,8 +26,7 @@ impl DataLoader {
     pub fn next_batch(&mut self) {
         // We need one more token for the last target
         if self.curr_idx + (self.T * self.B) + 1 > self.len {
-            // TODO: implement looping
-            panic!("No next batch!")
+            self.reset();
         }
         self.load_batch();
 
@@ -49,6 +48,10 @@ impl DataLoader {
             self.inputs.push(self.dataset[i]);
             self.targets.push(self.dataset[i + 1]);
         }
+    }
+
+    pub fn reset(&mut self) {
+        self.curr_idx = 0;
     }
 }
 
