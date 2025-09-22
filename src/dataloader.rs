@@ -39,10 +39,6 @@ impl DataLoader {
         self.targets = Vec::new();
 
         let end: usize = self.curr_idx + self.T * self.B;
-        println!(
-            "Loading data between {} and {} included",
-            self.curr_idx, end
-        );
 
         for i in self.curr_idx..end {
             self.inputs.push(self.dataset[i]);
