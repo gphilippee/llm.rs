@@ -1,6 +1,6 @@
 pub struct Tokenizer {
     vocab_size: usize,
-    eot_token: u32,
+    pub eot_token: usize,
     token_table: Option<Vec<String>>,
 }
 
@@ -51,13 +51,13 @@ pub fn load_tokenizer(file: &str) -> Tokenizer {
         let double = u32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
         tokenizer_header[i] = double;
     }
-    // println!("Tokenizer header {:?}", tokenizer_header);
 
     let mut tok = Tokenizer {
         vocab_size: tokenizer_header[2] as usize,
-        eot_token: tokenizer_header[3],
+        eot_token: tokenizer_header[3] as usize,
         token_table: None,
     };
+    println!("eot_token: {}", tok.eot_token);
 
     let mut token_table: Vec<String> = Vec::new();
     let mut iter = bytes[1024..].chunks(1);
@@ -65,7 +65,6 @@ pub fn load_tokenizer(file: &str) -> Tokenizer {
         let byte_4 = iter.next().unwrap();
         let length: u8 = byte_4[0];
 
-        // println!("Length: {}", length);
         let mut token = String::new();
         for _ in 0..length {
             let byte = iter.next().unwrap()[0];
@@ -74,7 +73,6 @@ pub fn load_tokenizer(file: &str) -> Tokenizer {
         }
         token_table.push(token);
     }
-    // println!("{:?}", token_table);
     assert!(
         token_table.len() == tok.vocab_size,
         "length are not equals token_table={}, vocab_size= {}",
