@@ -1528,16 +1528,22 @@ fn train(
 
         // get data batch
         train_dataloader.next_batch();
+        let now = SystemTime::now();
         // forward pass
         let probs: Vec<f32> = gpt.forward(&train_dataloader.inputs, B, T);
         let mean_loss: f32 = gpt.loss(&probs, &train_dataloader.targets, B, T);
-        println!("Training loss {} at step {}", mean_loss, step);
         // zero grad
         gpt.zero_grad();
         // backward pass
         gpt.backward(&train_dataloader.inputs, &train_dataloader.targets, B, T);
         // update
         gpt.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step + 1);
+
+        let time_elapsed_s = now.elapsed().unwrap().as_secs();
+        println!(
+            "step {}: loss {} (took {} s)\n",
+            step, mean_loss, time_elapsed_s
+        );
     }
 }
 
