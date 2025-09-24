@@ -1,4 +1,5 @@
 use core::{f32, num, slice};
+use rayon::prelude::*;
 use std::{
     io::{self, Write},
     iter::zip,
@@ -66,23 +67,31 @@ fn matmul_forward_naive(
 ) {
     // input (B,T,C)
     // output (B,T,OC)
-    for b in 0..B {
-        for t in 0..T {
-            let bt = b * T + t;
-            for o in 0..OC {
-                let mut val: f32;
-                if let Some(b) = bias {
-                    val = b[o];
-                } else {
-                    val = 0.0;
-                };
-                for i in 0..C {
-                    val += input[bt * C + i] * weight[o * C + i];
-                }
-                output[bt * OC + o] = val;
-            }
-        }
+    let rows = B * T;
+    assert_eq!(output.len(), rows * OC);
+    assert_eq!(input.len(), rows * C);
+    assert_eq!(weight.len(), OC * C);
+    if let Some(b) = bias.as_ref() {
+        assert_eq!(b.len(), OC);
     }
+
+    output
+        .par_chunks_mut(OC)
+        .enumerate()
+        .for_each(|(bt, out_row)| {
+            let inp_row = &input[bt * C..(bt + 1) * C];
+            for o in 0..OC {
+                let mut val: f32 = if let Some(b) = bias.as_ref() { b[o] } else { 0.0 };
+                let w_row = &weight[o * C..(o + 1) * C];
+                // dot product inp_row (C) · w_row (C)
+                // manual loop to avoid iterator overhead in hot path
+                let mut acc = val;
+                for i in 0..C {
+                    acc += inp_row[i] * w_row[i];
+                }
+                out_row[o] = acc;
+            }
+        });
 }
 
 fn matmul_backward(
