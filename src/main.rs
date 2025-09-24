@@ -54,7 +54,7 @@ fn check_tensor(pred: &[f32], target: &[f32], n: usize, label: &str) -> bool {
     return ok;
 }
 
-fn matmul_forward(
+fn matmul_forward_naive(
     output: &mut [f32],
     input: &[f32],
     weight: &[f32],
@@ -1000,7 +1000,7 @@ impl GPT2 {
                 T,
                 C,
             );
-            matmul_forward(
+            matmul_forward_naive(
                 &mut acts.qkv[l * B * T * 3 * C..(l + 1) * B * T * 3 * C],
                 &acts.ln1[l * B * T * C..],
                 &params.qkvw[l * 3 * C * C..],
@@ -1020,7 +1020,7 @@ impl GPT2 {
                 C,
                 NH,
             );
-            matmul_forward(
+            matmul_forward_naive(
                 &mut acts.attproj[l * B * T * C..(l + 1) * B * T * C],
                 &acts.atty[l * B * T * C..],
                 &params.attprojw[l * C * C..],
@@ -1047,7 +1047,7 @@ impl GPT2 {
                 T,
                 C,
             );
-            matmul_forward(
+            matmul_forward_naive(
                 &mut acts.fch[l * B * T * 4 * C..(l + 1) * B * T * 4 * C],
                 &acts.ln2[l * B * T * C..],
                 &params.fcw[l * 4 * C * C..],
@@ -1062,7 +1062,7 @@ impl GPT2 {
                 &acts.fch[l * B * T * 4 * C..],
                 B * T * 4 * C,
             );
-            matmul_forward(
+            matmul_forward_naive(
                 &mut acts.fcproj[l * B * T * C..(l + 1) * B * T * C],
                 &acts.fch_gelu[l * B * T * 4 * C..],
                 &params.fcprojw[l * 4 * C * C..],
@@ -1091,7 +1091,7 @@ impl GPT2 {
             T,
             C,
         );
-        matmul_forward(&mut acts.logits, &acts.lnf, &params.wte, None, B, T, C, Vp);
+        matmul_forward_naive(&mut acts.logits, &acts.lnf, &params.wte, None, B, T, C, Vp);
         softmax_forward(&mut acts.probs, &acts.logits, B, T, V, Vp, temperature);
         // output is (B,T,Vp)
         return acts.probs.clone();
