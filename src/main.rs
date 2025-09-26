@@ -81,7 +81,11 @@ fn matmul_forward_naive(
         .for_each(|(bt, out_row)| {
             let inp_row = &input[bt * C..(bt + 1) * C];
             for o in 0..OC {
-                let mut val: f32 = if let Some(b) = bias.as_ref() { b[o] } else { 0.0 };
+                let mut val: f32 = if let Some(b) = bias.as_ref() {
+                    b[o]
+                } else {
+                    0.0
+                };
                 let w_row = &weight[o * C..(o + 1) * C];
                 // dot product inp_row (C) · w_row (C)
                 // manual loop to avoid iterator overhead in hot path
@@ -110,23 +114,53 @@ fn matmul_backward(
     // inp (B, T, C)
     // weight (OC, C)
 
+    // most of the running time is spent here and in matmul_forward
+    // this backward could be done in a single "round" of loops
+    // but that doesn't afford an efficient parallelization strategy
+
+    // backward into inp first, parallelize over B,T
+    dinp.par_chunks_mut(C)
+        .enumerate()
+        .for_each(|(bt, dinp_row)| {
+            let btoc = bt * OC;
+            for o in 0..OC {
+                // gradient contribution to bias
+                for c in 0..C {
+                    // gradient contribution to input
+                    dinp_row[c] += weight[o * C + c] * dout[btoc + o];
+                }
+            }
+        });
+
+    // backward into weight: parallelize over output channels OC safely by
+    // splitting dweight into disjoint rows of length C
+    dweight
+        .par_chunks_mut(C)
+        .enumerate()
+        .for_each(|(o, dweight_row)| {
     for b in 0..B {
         for t in 0..T {
             let btc = b * T * C + t * C;
             let btoc = b * T * OC + t * OC;
-
-            for o in 0..OC {
-                // gradient contribution to bias
-                if let Some(db) = dbias.as_deref_mut() {
-                    db[o] += dout[btoc + o];
-                };
+                let dout_val = dout[btoc + o];
                 for c in 0..C {
-                    // gradient contribution to weight
-                    dweight[o * C + c] += inp[btc + c] * dout[btoc + o];
-                    // gradient contribution to input
-                    dinp[btc + c] += weight[o * C + c] * dout[btoc + o];
+                    dweight_row[c] += inp[btc + c] * dout_val;
                 }
             }
+        }
+    });
+
+    // backward into bias: compute separately to avoid mutable aliasing across threads
+                if let Some(db) = dbias.as_deref_mut() {
+        for o in 0..OC {
+            let mut sum = 0.0f32;
+            for b in 0..B {
+                for t in 0..T {
+                    let btoc = b * T * OC + t * OC;
+                    sum += dout[btoc + o];
+                }
+            }
+            db[o] += sum;
         }
     }
 }
@@ -187,12 +221,18 @@ fn attention_forward(
     let hs = C / NH; // head size
     let scale = 1.0 / (hs as f32).sqrt();
 
-    for b in 0..B {
+    // parallelize over batch dimension with disjoint mutable chunks
+    output
+        .par_chunks_mut(T * C)
+        .zip(preatt.par_chunks_mut(NH * T * T))
+        .zip(att.par_chunks_mut(NH * T * T))
+        .enumerate()
+        .for_each(|(b, ((output_b, preatt_b), att_b))| {
         for t in 0..T {
             for h in 0..NH {
                 let query_idx = b * T * C3 + t * C3 + h * hs;
-                let preatt_base = b * NH * T * T + h * T * T + t * T;
-                let att_base = b * NH * T * T + h * T * T + t * T; // att[b, h, t, :]
+                    let preatt_base = h * T * T + t * T; // within this batch chunk
+                    let att_base = h * T * T + t * T; // att[b, h, t, :]
 
                 // pass1: calculate query dot key and maxval
                 let mut maxval: f32 = f32::MIN;
@@ -211,41 +251,41 @@ fn attention_forward(
                     }
 
                     // preatt[b, h, t, t2]
-                    preatt[preatt_base + t2] = val;
+                        preatt_b[preatt_base + t2] = val;
                 }
 
                 // pass2: calcul the exp and keep track of sum
                 let mut expsum: f32 = 0.0;
                 for t2 in 0..=t {
-                    let expv = (preatt[preatt_base + t2] - maxval).exp();
+                        let expv = (preatt_b[preatt_base + t2] - maxval).exp();
                     expsum += expv;
-                    att[att_base + t2] = expv;
+                        att_b[att_base + t2] = expv;
                 }
                 let expsum_inv = if expsum == 0.0 { 0.0 } else { 1.0 / expsum };
 
                 // pass3: normalize to get the softmax
                 for t2 in 0..T {
                     if t2 <= t {
-                        att[att_base + t2] *= expsum_inv;
+                            att_b[att_base + t2] *= expsum_inv;
                     } else {
-                        att[att_base + t2] = 0.0;
+                            att_b[att_base + t2] = 0.0;
                     }
                 }
                 // pass4: accumulate weighted values into the output of attention
-                let out_base = b * T * C + t * C + h * hs; // output[b, t, h, :]
+                    let out_base = t * C + h * hs; // within this batch chunk, output[b, t, h, :]
                 for i in 0..hs {
-                    output[out_base + i] = 0.0;
+                        output_b[out_base + i] = 0.0;
                 }
                 for t2 in 0..=t {
                     let value_idx = b * T * C3 + t2 * C3 + h * hs + 2 * C; // + 2*C because it's value
-                    let att_t2 = att[att_base + t2];
+                        let att_t2 = att_b[att_base + t2];
                     for i in 0..hs {
-                        output[out_base + i] += att_t2 * inp[value_idx + i];
+                            output_b[out_base + i] += att_t2 * inp[value_idx + i];
                     }
                 }
             }
         }
-    }
+        });
 }
 
 fn attention_backward(
@@ -375,9 +415,11 @@ fn softmax_forward(
     // probs (B,T,Vp)
     // Vp is the padded vocab size
     // V is the real vocab size
-    for b in 0..B {
-        for t in 0..T {
-            let btv = b * T * Vp + t * Vp;
+    probs
+        .par_chunks_mut(B * T)
+        .enumerate()
+        .for_each(|(bt, probs_row)| {
+            let btv = bt * Vp;
 
             // maxval is only calculated and subtracted for numerical stability
             let mut maxval = f32::MIN; // TODO something better
@@ -389,14 +431,13 @@ fn softmax_forward(
 
             let mut sum: f32 = 0.0;
             for v in 0..V {
-                probs[btv + v] = f32::exp((logits[btv + v] - maxval) / temperature);
-                sum += probs[btv + v];
+                probs_row[btv + v] = f32::exp((logits[btv + v] - maxval) / temperature);
+                sum += probs_row[btv + v];
             }
             for v in 0..V {
-                probs[btv + v] /= sum;
+                probs_row[btv + v] /= sum;
             }
-        }
-    }
+        });
 }
 
 fn crossentropy_forward(
