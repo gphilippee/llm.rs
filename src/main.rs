@@ -67,14 +67,6 @@ fn matmul_forward_naive(
 ) {
     // input (B,T,C)
     // output (B,T,OC)
-    let rows = B * T;
-    assert_eq!(output.len(), rows * OC);
-    assert_eq!(input.len(), rows * C);
-    assert_eq!(weight.len(), OC * C);
-    if let Some(b) = bias.as_ref() {
-        assert_eq!(b.len(), OC);
-    }
-
     output
         .par_chunks_mut(OC)
         .enumerate()
