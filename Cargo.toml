@@ -5,3 +5,19 @@ edition = "2021"
 
 [dependencies]
 rayon = "1.10"
+
+[profile.release]
+# Maximum optimization level
+opt-level = 3
+# Enable link-time optimization for better cross-crate optimizations
+lto = "thin"
+# Enable codegen units for better optimization
+codegen-units = 1
+# Enable panic = "abort" for smaller binaries and better performance
+panic = "abort"
+# Enable overflow checks in debug but not release
+overflow-checks = false
+# Enable debug info for profiling (can be removed for final release)
+debug = 1
+# Enable additional optimizations
+strip = false
