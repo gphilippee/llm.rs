@@ -4,6 +4,7 @@ use std::{
     iter::zip,
     time::SystemTime,
 };
+use rand::random;
 
 mod dataloader;
 mod tokenizer;
@@ -52,6 +53,18 @@ fn check_tensor(pred: &[f32], target: &[f32], n: usize, label: &str) -> bool {
         println!("TENSOR NOT OK, maxdiff = {}", maxdiff);
     }
     return ok;
+}
+
+fn sample_mult(probs: &[f32], n: usize) -> usize {
+    let mut cdf: f32 = 0.0;
+    let random_prod = random::<f32>();
+    for i in 0..n {
+        cdf += probs[i];
+        if cdf > random_prod {
+            return i
+        }
+    }
+    n - 1
 }
 
 fn matmul_forward_naive(
@@ -1604,14 +1617,9 @@ fn train(
             for t in 1..genT {
                 let probs = gpt.forward(&gen_tokens, B, T);
                 // probs (B,T,Vp)
-                // sample the largest element on the first batch
-                let sampled_token_id = probs[(t - 1) * Vp..(t - 1) * Vp + V]
-                    .iter()
-                    .enumerate()
-                    .max_by(|(_, x), (_, y)| x.partial_cmp(y).expect("Partial comparison paniced"))
-                    .map(|(index, _)| index)
-                    .expect("No index was found");
-                gen_tokens[t] = sampled_token_id;
+                // sample w.r.t the probabilities
+                let token_id = sample_mult(&probs[(t - 1) * Vp..(t - 1) * Vp + V], V);
+                gen_tokens[t] = token_id;
             }
 
             let gen_text = tokenizer.batch_decode(&gen_tokens);
