@@ -89,6 +89,57 @@ fn matmul_forward_naive(
             }
         });
 }
+fn matmul_forward(
+    output: &mut [f32],
+    input: &[f32],
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    B: usize,
+    T: usize,
+    C: usize,
+    OC: usize,
+) {
+    // Use SIMD version for better performance
+    if C >= 8 && OC >= 1 {
+        matmul_forward_simd(output, input, weight, bias, B, T, C, OC);
+        return;
+    }
+    
+    // Fallback to original optimized version
+    const LOOP_UNROLL: usize = 8;
+    if B * T % LOOP_UNROLL != 0 {
+        matmul_forward_naive(output, input, weight, bias, B, T, C, OC);
+        return;
+    }
+
+    for obt in (0..B*T).step_by(LOOP_UNROLL) {
+        for o in 0..OC {
+            let mut result: [f32; 8] = [0f32; LOOP_UNROLL];
+            // initialize the bias, if it exists
+            if let Some(b) = bias {
+                for ibt in 0..LOOP_UNROLL {
+                    result[ibt] = b[o];
+                }
+            }
+
+            // inner loops. Because we do LOOP_UNROLL steps of inner bt, we can cache
+            // the value of weight[i + o * C] and reuse it.
+            // we compile with -Ofast, so the compiler will turn the inner loop into FMAs
+            for i in 0..C {
+                let w = weight[i + o * C];
+                for ibt in 0..LOOP_UNROLL {
+                    let bt = obt + ibt;
+                    result[ibt] += input[bt * C + i] * w;
+                }
+            }
+            // write back results to main memory
+            for ibt in 0..LOOP_UNROLL {
+                let bt = obt + ibt;
+                output[bt * OC + o] = result[ibt];
+            }
+        }
+    }
+}
 
 fn matmul_backward(
     dinp: &mut [f32],
@@ -408,7 +459,7 @@ fn softmax_forward(
     // Vp is the padded vocab size
     // V is the real vocab size
     probs
-        .par_chunks_mut(B * T)
+        .par_chunks_mut(Vp)
         .enumerate()
         .for_each(|(bt, probs_row)| {
             let btv = bt * Vp;
@@ -423,11 +474,11 @@ fn softmax_forward(
 
             let mut sum: f32 = 0.0;
             for v in 0..V {
-                probs_row[btv + v] = f32::exp((logits[btv + v] - maxval) / temperature);
-                sum += probs_row[btv + v];
+                probs_row[v] = f32::exp((logits[btv + v] - maxval) / temperature);
+                sum += probs_row[v];
             }
             for v in 0..V {
-                probs_row[btv + v] /= sum;
+                probs_row[v] /= sum;
             }
         });
 }
@@ -1024,7 +1075,6 @@ impl GPT2 {
         // forward pass
         encoder_forward(&mut acts.encoded, inputs, &params.wte, &params.wpe, B, T, C);
         for l in 0..L {
-            // println!("Layer n°{}", l);
             // Input to this layer
             let residual: &[f32] = if l == 0 {
                 &acts.encoded // (B, T, C)
@@ -1042,7 +1092,7 @@ impl GPT2 {
                 T,
                 C,
             );
-            matmul_forward_naive(
+            matmul_forward(
                 &mut acts.qkv[l * B * T * 3 * C..(l + 1) * B * T * 3 * C],
                 &acts.ln1[l * B * T * C..],
                 &params.qkvw[l * 3 * C * C..],
@@ -1062,7 +1112,7 @@ impl GPT2 {
                 C,
                 NH,
             );
-            matmul_forward_naive(
+            matmul_forward(
                 &mut acts.attproj[l * B * T * C..(l + 1) * B * T * C],
                 &acts.atty[l * B * T * C..],
                 &params.attprojw[l * C * C..],
@@ -1089,7 +1139,7 @@ impl GPT2 {
                 T,
                 C,
             );
-            matmul_forward_naive(
+            matmul_forward(
                 &mut acts.fch[l * B * T * 4 * C..(l + 1) * B * T * 4 * C],
                 &acts.ln2[l * B * T * C..],
                 &params.fcw[l * 4 * C * C..],
@@ -1104,7 +1154,7 @@ impl GPT2 {
                 &acts.fch[l * B * T * 4 * C..],
                 B * T * 4 * C,
             );
-            matmul_forward_naive(
+            matmul_forward(
                 &mut acts.fcproj[l * B * T * C..(l + 1) * B * T * C],
                 &acts.fch_gelu[l * B * T * 4 * C..],
                 &params.fcprojw[l * 4 * C * C..],
@@ -1133,7 +1183,7 @@ impl GPT2 {
             T,
             C,
         );
-        matmul_forward_naive(&mut acts.logits, &acts.lnf, &params.wte, None, B, T, C, Vp);
+        matmul_forward(&mut acts.logits, &acts.lnf, &params.wte, None, B, T, C, Vp);
         softmax_forward(&mut acts.probs, &acts.logits, B, T, V, Vp, temperature);
         // output is (B,T,Vp)
         return acts.probs.clone();
@@ -1510,6 +1560,7 @@ fn train(
     B: usize,
     T: usize,
 ) {
+    println!("Running train...");
     let mut train_dataloader = dataloader::create_dataloader(train_data_path, B, T);
     println!("Load train dataloader with {} tokens", train_dataloader.len);
     let mut val_dataloader = dataloader::create_dataloader(val_data_path, B, T);
@@ -1532,7 +1583,7 @@ fn train(
     let Vp = gpt.config.padded_vocab_size;
     let V = gpt.config.vocab_size;
 
-    for step in 0..1200 {
+    for step in 0..40 {
         // validate every 10 step
         if step % 10 == 0 {
             let mut val_loss = 0f32;
@@ -1590,6 +1641,7 @@ fn train(
 }
 
 fn test(model_path: &str, debug_path: &str) {
+    println!("Running test...");
     let temperature: f32 = 1.0;
     let mut gpt = load_model(&model_path, temperature);
     let (B, T, x, y, expected_logits, expected_loss, expected_grads) =
