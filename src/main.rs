@@ -1,7 +1,6 @@
-use core::{f32, num, slice};
+use core::f32;
 use rayon::prelude::*;
 use std::{
-    io::{self, Write},
     iter::zip,
     time::SystemTime,
 };
@@ -1583,7 +1582,7 @@ fn train(
     let Vp = gpt.config.padded_vocab_size;
     let V = gpt.config.vocab_size;
 
-    for step in 0..40 {
+    for step in 0..=40 {
         // validate every 10 step
         if step % 10 == 0 {
             let mut val_loss = 0f32;
@@ -1632,10 +1631,10 @@ fn train(
         // update
         gpt.update(1e-4, 0.9, 0.999, 1e-8, 0.0, step + 1);
 
-        let time_elapsed_s = now.elapsed().unwrap().as_secs();
+        let time_elapsed_ms = now.elapsed().unwrap().as_millis();
         println!(
-            "step {}: loss {} (took {} s)\n",
-            step, mean_loss, time_elapsed_s
+            "step {}: loss {} (took {} ms)",
+            step, mean_loss, time_elapsed_ms
         );
     }
 }
@@ -1671,20 +1670,16 @@ fn test(model_path: &str, debug_path: &str) {
     for step in 0..10 {
         let now = SystemTime::now();
 
-        // forward pass
         let probs: Vec<f32> = gpt.forward(&x, B, T);
         let mean_loss: f32 = gpt.loss(&probs, &y, B, T);
-        // zero grad
         gpt.zero_grad();
-        // backward pass
         gpt.backward(&x, &y, B, T);
-        // update
         gpt.update(1e-4, 0.9, 0.999, 1e-8, 0.01, step + 1);
 
-        let time_elapsed_s = now.elapsed().unwrap().as_secs();
+        let time_elapsed_ms = now.elapsed().unwrap().as_millis();
         println!(
-            "step {}: loss {} (took {} s)\n",
-            step, mean_loss, time_elapsed_s
+            "step {}: loss {} (took {} ms)",
+            step, mean_loss, time_elapsed_ms
         );
 
         if step == 0 {
@@ -1797,27 +1792,6 @@ fn main() {
     let debug_path = "/Users/gphilippe/dev/llm.c/gpt2_124M_debug_state.bin";
     let tokenizer_path = "/Users/gphilippe/dev/llm.c/gpt2_tokenizer.bin";
 
-    // println!("Max sequence length: {}", gpt.config.max_seq_len);
-
-    // Check that tokens
-    // Fix with new dataloader
-    // tokenizer.check(&dataset);
-
-    // Build inputs and target
-    // Avoid to load everything directly
-    // println!("Dataset length: {}", inputs.len());
-
-    // Decode the dataset
-    // let text = tokenizer.batch_decode(&targets);
-    // println!("Text {}", text);
-
-    // Check input data
-    // let inputs_batch = &inputs[0..B*T];
-    // println!("{:?}", &inputs_batch);
-    // let text = tokenizer.batch_decode(&inputs_batch);
-    // println!("Text is {}", text);
-    // let targets_batch = targets[0..B*T];
-
     train(
         model_path,
         tokenizer_path,
@@ -1829,7 +1803,7 @@ fn main() {
 
     // test(model_path, debug_path);
 
-    // generate
+    // Generate
     // let mut train_dataloader = dataloader::create_dataloader(train_data_path, B, T);
     // println!("Load train dataloader with {} tokens", train_dataloader.len);
 
