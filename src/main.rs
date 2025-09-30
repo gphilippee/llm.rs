@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use core::f32;
 use rayon::prelude::*;
 use std::{
@@ -1508,7 +1510,6 @@ impl GPT2 {
         N: usize,
         B: usize,
         T: usize,
-        temperature: f32,
         tokenizer: &tokenizer::Tokenizer,
     ) {
         //TODO: ignore B actually
@@ -1786,13 +1787,12 @@ fn generate(
     let mut gpt = load_model(&model_path, temperature);
     load_acts(&mut gpt, 1, T);
 
-    gpt.generate(input, N, B, T, temperature, &tokenizer);
+    gpt.generate(input, N, B, T, &tokenizer);
 }
 
 fn main() {
     let B: usize = 4;
     let T: usize = 64;
-    let temperature: f32 = 1.0;
 
     let train_data_path =
         "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
@@ -1820,5 +1820,5 @@ fn main() {
     // let input = train_dataloader.inputs[0..T].to_vec();
 
     // let tokens_to_sample: usize = 10;
-    // generate(model_path, tokenizer_path, input, T, temperature, tokens_to_sample);
+    // generate(model_path, tokenizer_path, input, T, tokens_to_sample);
 }
