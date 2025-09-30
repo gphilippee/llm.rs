@@ -6,10 +6,10 @@ use std::{
     iter::zip,
     time::SystemTime,
 };
-use rand::random;
 
 mod dataloader;
 mod tokenizer;
+mod utils;
 
 // T = sequence_length
 // B = batch_size
@@ -17,65 +17,13 @@ mod tokenizer;
 // V = vocab_size
 // Vp = vocabulary padded (for efficiency)
 
-fn check_tensor(pred: &[f32], target: &[f32], n: usize, label: &str) -> bool {
-    let print_upto = 0;
-    let mut ok = true;
-    let mut maxdiff = 0f32;
-    let tol = 2e-2f32;
-    println!("{}", label);
-    for i in 0..n {
-        // look at the diffence at position i of these two tensors
-        let diff = (pred[i] - target[i]).abs();
-
-        // keep track of the overall error
-        ok = ok & (diff <= tol);
-        if diff > maxdiff {
-            maxdiff = diff;
-        }
-
-        // for the first few elements of each tensor, pretty print
-        // the actual numbers, so we can do a visual, qualitative proof/assessment
-        if i < print_upto {
-            if diff <= tol {
-                if i < print_upto {
-                    println!("OK ");
-                }
-            } else {
-                if i < print_upto {
-                    println!("NOT OK ");
-                }
-            }
-            println!("{} {}", pred[i], target[i]);
-        }
-    }
-    // print the final result for this tensor
-    if ok {
-        println!("TENSOR OK, maxdiff = {}", maxdiff);
-    } else {
-        println!("TENSOR NOT OK, maxdiff = {}", maxdiff);
-    }
-    return ok;
-}
-
-fn sample_mult(probs: &[f32], n: usize) -> usize {
-    let mut cdf: f32 = 0.0;
-    let random_prod = random::<f32>();
-    for i in 0..n {
-        cdf += probs[i];
-        if cdf > random_prod {
-            return i
-        }
-    }
-    n - 1
-}
-
 fn matmul_forward_naive(
     output: &mut [f32],
     input: &[f32],
     weight: &[f32],
     bias: Option<&[f32]>,
-    B: usize,
-    T: usize,
+    _B: usize,
+    _T: usize,
     C: usize,
     OC: usize,
 ) {
@@ -265,7 +213,7 @@ fn attention_forward(
     preatt: &mut [f32],
     att: &mut [f32],
     inp: &[f32],
-    B: usize,
+    _B: usize,
     T: usize,
     C: usize,
     NH: usize,
@@ -464,8 +412,8 @@ fn encoder_backward(
 fn softmax_forward(
     probs: &mut [f32],
     logits: &[f32],
-    B: usize,
-    T: usize,
+    _B: usize,
+    _T: usize,
     V: usize,
     Vp: usize,
     temperature: f32,
@@ -1621,7 +1569,7 @@ fn train(
                 let probs = gpt.forward(&gen_tokens, B, T);
                 // probs (B,T,Vp)
                 // sample w.r.t the probabilities
-                let token_id = sample_mult(&probs[(t - 1) * Vp..(t - 1) * Vp + V], V);
+                let token_id = utils::sample_mult(&probs[(t - 1) * Vp..(t - 1) * Vp + V], V);
                 gen_tokens[t] = token_id;
             }
 
@@ -1728,37 +1676,37 @@ fn test(model_path: &str, debug_path: &str) {
 
             // Check gradients
             let grads = &gpt.grads;
-            check_tensor(&grads.wte, &expected_grads.wte, V * C, "dwte");
-            check_tensor(&grads.wpe, &expected_grads.wpe, maxT * C, "dwpe");
-            check_tensor(&grads.ln1w, &expected_grads.ln1w, L * C, "dln1w");
-            check_tensor(&grads.ln1b, &expected_grads.ln1b, L * C, "dln1b");
-            check_tensor(&grads.qkvw, &expected_grads.qkvw, L * 3 * C * C, "dqkvw");
-            check_tensor(&grads.qkvb, &expected_grads.qkvb, L * 3 * C, "dqkvb");
-            check_tensor(
+            utils::check_tensor(&grads.wte, &expected_grads.wte, V * C, "dwte");
+            utils::check_tensor(&grads.wpe, &expected_grads.wpe, maxT * C, "dwpe");
+            utils::check_tensor(&grads.ln1w, &expected_grads.ln1w, L * C, "dln1w");
+            utils::check_tensor(&grads.ln1b, &expected_grads.ln1b, L * C, "dln1b");
+            utils::check_tensor(&grads.qkvw, &expected_grads.qkvw, L * 3 * C * C, "dqkvw");
+            utils::check_tensor(&grads.qkvb, &expected_grads.qkvb, L * 3 * C, "dqkvb");
+            utils::check_tensor(
                 &grads.attprojw,
                 &expected_grads.attprojw,
                 L * C * C,
                 "dattprojw",
             );
-            check_tensor(
+            utils::check_tensor(
                 &grads.attprojb,
                 &expected_grads.attprojb,
                 L * C,
                 "dattprojb",
             );
-            check_tensor(&grads.ln2w, &expected_grads.ln2w, L * C, "dln2w");
-            check_tensor(&grads.ln2b, &expected_grads.ln2b, L * C, "dln2b");
-            check_tensor(&grads.fcw, &expected_grads.fcw, L * 4 * C * C, "dfcw");
-            check_tensor(&grads.fcb, &expected_grads.fcb, L * 4 * C, "dfcb");
-            check_tensor(
+            utils::check_tensor(&grads.ln2w, &expected_grads.ln2w, L * C, "dln2w");
+            utils::check_tensor(&grads.ln2b, &expected_grads.ln2b, L * C, "dln2b");
+            utils::check_tensor(&grads.fcw, &expected_grads.fcw, L * 4 * C * C, "dfcw");
+            utils::check_tensor(&grads.fcb, &expected_grads.fcb, L * 4 * C, "dfcb");
+            utils::check_tensor(
                 &grads.fcprojw,
                 &expected_grads.fcprojw,
                 L * C * 4 * C,
                 "dfcprojw",
             );
-            check_tensor(&grads.fcprojb, &expected_grads.fcprojb, L * C, "dfcprojb");
-            check_tensor(&grads.lnfw, &expected_grads.lnfw, C, "dlnfw");
-            check_tensor(&grads.lnfb, &expected_grads.lnfb, C, "dlnfb");
+            utils::check_tensor(&grads.fcprojb, &expected_grads.fcprojb, L * C, "dfcprojb");
+            utils::check_tensor(&grads.lnfw, &expected_grads.lnfw, C, "dlnfw");
+            utils::check_tensor(&grads.lnfb, &expected_grads.lnfb, C, "dlnfb");
         }
         // Check loss
         let exp_loss = expected_losses[step];
