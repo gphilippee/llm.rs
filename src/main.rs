@@ -1621,7 +1621,7 @@ fn train(
                 gen_tokens[t] = token_id;
             }
 
-            let gen_text = tokenizer.batch_decode(&gen_tokens);
+            let gen_text = tokenizer.batch_decode(&gen_tokens[1..genT]);
             println!("Generated text: '{}'", gen_text);
         }
 
