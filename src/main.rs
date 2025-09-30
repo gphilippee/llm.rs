@@ -191,7 +191,7 @@ fn gelu_backward(dinp: &mut [f32], dout: &[f32], input: &[f32], N: usize) {
         let sech_out = 1.0 / (coshf_out * coshf_out);
         let local_grad = 0.5 * (1.0 + tanh_out)
             + x * 0.5 * sech_out * scaling_factor * (1.0 + 3.0 * 0.044715 * x * x);
-        dinp[i] += local_grad * dout[i]
+        dinp[i] += local_grad * dout[i];
     }
 }
 
@@ -591,7 +591,7 @@ fn layernorm_backward(
                 dval -= dnorm_mean; // term 2
                 dval -= n * dnorm_norm_mean; // term 3
                 dval *= reciprocal_std; // final scale
-                dinp[bt + c] += dval
+                dinp[bt + c] += dval;
             }
         }
     }
