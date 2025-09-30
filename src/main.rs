@@ -85,7 +85,7 @@ fn matmul_forward_naive(
         .for_each(|(bt, out_row)| {
             let inp_row = &input[bt * C..(bt + 1) * C];
             for o in 0..OC {
-                let mut val: f32 = if let Some(b) = bias.as_ref() {
+                let mut acc: f32 = if let Some(b) = bias.as_ref() {
                     b[o]
                 } else {
                     0.0
@@ -93,7 +93,6 @@ fn matmul_forward_naive(
                 let w_row = &weight[o * C..(o + 1) * C];
                 // dot product inp_row (C) · w_row (C)
                 // manual loop to avoid iterator overhead in hot path
-                let mut acc = val;
                 for i in 0..C {
                     acc += inp_row[i] * w_row[i];
                 }
