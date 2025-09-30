@@ -59,8 +59,7 @@ pub fn create_dataloader(data_path: &str, B: usize, T: usize) -> DataLoader {
     let mut dataset: Vec<usize> = Vec::new();
     // Data header (skip it)
     for _ in 0..512 {
-        let bytes = iter.next().unwrap();
-        // let char = u16::from_be_bytes([bytes[1], bytes[0]]);
+        iter.next().unwrap();
     }
 
     for bytes in iter {
