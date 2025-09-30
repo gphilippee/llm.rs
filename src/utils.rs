@@ -46,7 +46,7 @@ pub fn sample_mult(probs: &[f32], n: usize) -> usize {
     for i in 0..n {
         cdf += probs[i];
         if cdf > random_prod {
-            return i
+            return i;
         }
     }
     n - 1

@@ -2,10 +2,7 @@
 
 use core::f32;
 use rayon::prelude::*;
-use std::{
-    iter::zip,
-    time::SystemTime,
-};
+use std::{iter::zip, time::SystemTime};
 
 mod dataloader;
 mod tokenizer;
@@ -67,38 +64,30 @@ fn matmul_forward(
     // OC is short for "output channels"
     // inp is (B,T,C), weight is (OC, C), bias is (OC)
     // out will be (B,T,OC)
-    
-    // Fallback to original optimized version
-    const LOOP_UNROLL: usize = 8;
-    if B * T % LOOP_UNROLL != 0 {
-        matmul_forward_naive(output, input, weight, bias, B, T, C, OC);
-        return;
-    }
 
-    for obt in (0..B*T).step_by(LOOP_UNROLL) {
-        for o in 0..OC {
-            let mut result: [f32; 8] = [0f32; LOOP_UNROLL];
-            // initialize the bias, if it exists
-            if let Some(b) = bias {
-                for ibt in 0..LOOP_UNROLL {
-                    result[ibt] = b[o];
-                }
-            }
+    unsafe {
+        matrixmultiply::sgemm(
+            B * T,
+            C,
+            OC,
+            1.0,
+            input.as_ptr(),
+            C as isize,
+            1,
+            weight.as_ptr(),
+            1,
+            C as isize,
+            0.0,
+            output.as_mut_ptr(),
+            OC as isize,
+            1,
+        )
+    };
 
-            // inner loops. Because we do LOOP_UNROLL steps of inner bt, we can cache
-            // the value of weight[i + o * C] and reuse it.
-            // we compile with -Ofast, so the compiler will turn the inner loop into FMAs
-            for i in 0..C {
-                let w = weight[i + o * C];
-                for ibt in 0..LOOP_UNROLL {
-                    let bt = obt + ibt;
-                    result[ibt] += input[bt * C + i] * w;
-                }
-            }
-            // write back results to main memory
-            for ibt in 0..LOOP_UNROLL {
-                let bt = obt + ibt;
-                output[bt * OC + o] = result[ibt];
+    if let Some(b) = bias.as_deref() {
+        for bt in 0..B * T {
+            for o in 0..OC {
+                output[bt * OC + o] += b[o];
             }
         }
     }
@@ -124,40 +113,46 @@ fn matmul_backward(
     // this backward could be done in a single "round" of loops
     // but that doesn't afford an efficient parallelization strategy
 
-    // backward into inp first, parallelize over B,T
-    dinp.par_chunks_mut(C)
-        .enumerate()
-        .for_each(|(bt, dinp_row)| {
-            let btoc = bt * OC;
-            for o in 0..OC {
-                // gradient contribution to bias
-                for c in 0..C {
-                    // gradient contribution to input
-                    dinp_row[c] += weight[o * C + c] * dout[btoc + o];
-                }
-            }
-        });
+    unsafe {
+        // dinp += dout @ weight
+        matrixmultiply::sgemm(
+            B * T,
+            OC,
+            C,
+            1.0,
+            dout.as_ptr(),
+            OC as isize,
+            1,
+            weight.as_ptr(),
+            C as isize,
+            1,
+            1.0,
+            dinp.as_mut_ptr(),
+            C as isize,
+            1,
+        );
 
-    // backward into weight: parallelize over output channels OC safely by
-    // splitting dweight into disjoint rows of length C
-    dweight
-        .par_chunks_mut(C)
-        .enumerate()
-        .for_each(|(o, dweight_row)| {
-    for b in 0..B {
-        for t in 0..T {
-            let btc = b * T * C + t * C;
-            let btoc = b * T * OC + t * OC;
-                let dout_val = dout[btoc + o];
-                for c in 0..C {
-                    dweight_row[c] += inp[btc + c] * dout_val;
-                }
-            }
-        }
-    });
+        // dweight += dout^T @ inp
+        matrixmultiply::sgemm(
+            OC,
+            B * T,
+            C,
+            1.0,
+            dout.as_ptr(),
+            1,
+            OC as isize,
+            inp.as_ptr(),
+            C as isize,
+            1,
+            1.0,
+            dweight.as_mut_ptr(),
+            C as isize,
+            1,
+        );
+    }
 
     // backward into bias: compute separately to avoid mutable aliasing across threads
-                if let Some(db) = dbias.as_deref_mut() {
+    if let Some(db) = dbias.as_deref_mut() {
         for o in 0..OC {
             let mut sum = 0.0f32;
             for b in 0..B {
@@ -237,61 +232,61 @@ fn attention_forward(
             // Cache-friendly access pattern: process heads in order
             for h in 0..NH {
                 for t in 0..T {
-                let query_idx = b * T * C3 + t * C3 + h * hs;
+                    let query_idx = b * T * C3 + t * C3 + h * hs;
                     let preatt_base = h * T * T + t * T; // within this batch chunk
                     let att_base = h * T * T + t * T; // att[b, h, t, :]
 
-                // pass1: calculate query dot key and maxval
-                let mut maxval: f32 = f32::MIN;
+                    // pass1: calculate query dot key and maxval
+                    let mut maxval: f32 = f32::MIN;
 
-                for t2 in 0..=t {
-                    let mut val: f32 = 0.0;
-                    let key_idx = b * T * C3 + t2 * C3 + h * hs + C; // + C because it's key
+                    for t2 in 0..=t {
+                        let mut val: f32 = 0.0;
+                        let key_idx = b * T * C3 + t2 * C3 + h * hs + C; // + C because it's key
 
-                    for i in 0..hs {
-                        val += inp[query_idx + i] * inp[key_idx + i];
-                    }
-                    val *= scale;
+                        for i in 0..hs {
+                            val += inp[query_idx + i] * inp[key_idx + i];
+                        }
+                        val *= scale;
 
-                    if val > maxval {
-                        maxval = val;
-                    }
+                        if val > maxval {
+                            maxval = val;
+                        }
 
-                    // preatt[b, h, t, t2]
+                        // preatt[b, h, t, t2]
                         preatt_b[preatt_base + t2] = val;
-                }
-
-                // pass2: calcul the exp and keep track of sum
-                let mut expsum: f32 = 0.0;
-                for t2 in 0..=t {
-                        let expv = (preatt_b[preatt_base + t2] - maxval).exp();
-                    expsum += expv;
-                        att_b[att_base + t2] = expv;
-                }
-                let expsum_inv = if expsum == 0.0 { 0.0 } else { 1.0 / expsum };
-
-                // pass3: normalize to get the softmax
-                for t2 in 0..T {
-                    if t2 <= t {
-                            att_b[att_base + t2] *= expsum_inv;
-                    } else {
-                            att_b[att_base + t2] = 0.0;
                     }
-                }
-                // pass4: accumulate weighted values into the output of attention
+
+                    // pass2: calcul the exp and keep track of sum
+                    let mut expsum: f32 = 0.0;
+                    for t2 in 0..=t {
+                        let expv = (preatt_b[preatt_base + t2] - maxval).exp();
+                        expsum += expv;
+                        att_b[att_base + t2] = expv;
+                    }
+                    let expsum_inv = if expsum == 0.0 { 0.0 } else { 1.0 / expsum };
+
+                    // pass3: normalize to get the softmax
+                    for t2 in 0..T {
+                        if t2 <= t {
+                            att_b[att_base + t2] *= expsum_inv;
+                        } else {
+                            att_b[att_base + t2] = 0.0;
+                        }
+                    }
+                    // pass4: accumulate weighted values into the output of attention
                     let out_base = t * C + h * hs; // within this batch chunk, output[b, t, h, :]
-                for i in 0..hs {
-                        output_b[out_base + i] = 0.0;
-                }
-                for t2 in 0..=t {
-                    let value_idx = b * T * C3 + t2 * C3 + h * hs + 2 * C; // + 2*C because it's value
-                        let att_t2 = att_b[att_base + t2];
                     for i in 0..hs {
+                        output_b[out_base + i] = 0.0;
+                    }
+                    for t2 in 0..=t {
+                        let value_idx = b * T * C3 + t2 * C3 + h * hs + 2 * C; // + 2*C because it's value
+                        let att_t2 = att_b[att_base + t2];
+                        for i in 0..hs {
                             output_b[out_base + i] += att_t2 * inp[value_idx + i];
+                        }
                     }
                 }
             }
-        }
         });
 }
 
