@@ -100,6 +100,7 @@ fn matmul_forward_naive(
             }
         });
 }
+
 fn matmul_forward(
     output: &mut [f32],
     input: &[f32],
@@ -110,11 +111,12 @@ fn matmul_forward(
     C: usize,
     OC: usize,
 ) {
-    // Use SIMD version for better performance
-    if C >= 8 && OC >= 1 {
-        matmul_forward_simd(output, input, weight, bias, B, T, C, OC);
-        return;
-    }
+    // most of the running time is spent here and in matmul_backward
+    // therefore, the implementation below is very mildly optimized
+    // this function is otherwise identical to that of matmul_forward_naive()
+    // OC is short for "output channels"
+    // inp is (B,T,C), weight is (OC, C), bias is (OC)
+    // out will be (B,T,OC)
     
     // Fallback to original optimized version
     const LOOP_UNROLL: usize = 8;
@@ -282,8 +284,9 @@ fn attention_forward(
         .zip(att.par_chunks_mut(NH * T * T))
         .enumerate()
         .for_each(|(b, ((output_b, preatt_b), att_b))| {
-        for t in 0..T {
+            // Cache-friendly access pattern: process heads in order
             for h in 0..NH {
+                for t in 0..T {
                 let query_idx = b * T * C3 + t * C3 + h * hs;
                     let preatt_base = h * T * T + t * T; // within this batch chunk
                     let att_base = h * T * T + t * T; // att[b, h, t, :]
