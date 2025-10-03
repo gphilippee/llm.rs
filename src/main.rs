@@ -1738,12 +1738,12 @@ fn main() {
     let T: usize = 64;
 
     let train_data_path =
-        "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
+        "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
     let val_data_path =
-        "/Users/gphilippe/dev/llm.c/dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
-    let model_path = "/Users/gphilippe/dev/llm.c/gpt2_124M.bin";
-    let debug_path = "/Users/gphilippe/dev/llm.c/gpt2_124M_debug_state.bin";
-    let tokenizer_path = "/Users/gphilippe/dev/llm.c/gpt2_tokenizer.bin";
+        "dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
+    let model_path = "gpt2_124M.bin";
+    let debug_path = "gpt2_124M_debug_state.bin";
+    let tokenizer_path = "gpt2_tokenizer.bin";
 
     train(
         model_path,
@@ -1755,13 +1755,4 @@ fn main() {
     );
 
     // test(model_path, debug_path);
-
-    // Generate
-    // let mut train_dataloader = dataloader::create_dataloader(train_data_path, B, T);
-    // println!("Load train dataloader with {} tokens", train_dataloader.len);
-
-    // let input = train_dataloader.inputs[0..T].to_vec();
-
-    // let tokens_to_sample: usize = 10;
-    // generate(model_path, tokenizer_path, input, T, tokens_to_sample);
 }
