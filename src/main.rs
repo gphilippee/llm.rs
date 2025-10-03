@@ -6,7 +6,6 @@ use std::{iter::zip, time::SystemTime};
 mod dataloader;
 mod tokenizer;
 mod utils;
-mod passes;
 use passes::*;
 
 // T = sequence_length
