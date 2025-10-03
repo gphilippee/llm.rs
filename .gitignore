@@ -1,3 +1,7 @@
 /target
 .python-version
 data/
+gpt2_124M.bin
+gpt2_124M_bf16.bin
+gpt2_124M_debug_state.bin
+gpt2_tokenizer.bin
