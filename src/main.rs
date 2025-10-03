@@ -4,6 +4,7 @@ use core::f32;
 use std::{iter::zip, time::SystemTime};
 
 mod dataloader;
+mod passes;
 mod tokenizer;
 mod utils;
 use passes::*;
@@ -551,7 +552,6 @@ impl GPT2 {
                 B * T * C,
             );
         }
-        // println!("Layers applied");
         layernorm_forward(
             &mut acts.lnf,
             &mut acts.lnf_mean,
@@ -765,19 +765,6 @@ impl GPT2 {
             mean_loss += loss;
         }
         mean_loss /= (B * T) as f32;
-
-        // Check the probability that the model is giving to the target token
-        // It should increase during training
-        if false {
-            for (i, target_token) in targets.iter().enumerate() {
-                let target_token_probability = probs[i * Vp + target_token];
-                println!(
-                    "Expected token {} - Probability {}",
-                    target_token, target_token_probability
-                );
-            }
-        }
-
         mean_loss
     }
 
@@ -785,7 +772,6 @@ impl GPT2 {
         // output is (B, T) if only_last=false
         // (B) if only_last=true
         // get the token with the highest probability for each dimension (temperature=1)
-        // println!("Sampling token with the highest probability");
         let Vp = self.config.padded_vocab_size;
         let mut token_ids: Vec<usize>;
         if only_last {
@@ -834,21 +820,17 @@ impl GPT2 {
     ) -> Vec<usize> {
         // inputs (B, T)
         // outputs (B, T + N)
-        // println!("Batch sampling of {} tokens", N);
         let mut modified_inputs = inputs.clone();
         let mut outputs = inputs.clone();
         for i in 0..N {
-            // println!("Generate token n°{}", i);
             // inputs is (1,T)
-            // println!("Inputs {:?}", modified_inputs);
-
             // probs is (B, T, Vp)
             let probs: Vec<f32> = self.forward(&modified_inputs, B, T);
 
             // (B) due to only_last=true
             let tokens = self.argmax(probs, true, B, T);
 
-            // consider only the first batcg element
+            // consider only the first batch element
             for b in 0..1 {
                 // Insert at the end of the batched input
                 outputs.insert((b + 1) * (T + i), tokens[b]);
@@ -856,13 +838,6 @@ impl GPT2 {
                 modified_inputs.insert((b + 1) * T, tokens[b]);
                 // Remove the first token
                 modified_inputs.remove(b * T);
-
-                if b == 0 {
-                    // println!("Sampled token {}", tokens[b]);
-                    let token = tokenizer.decode(tokens[b]);
-                    println!("Token n°{i}: `{}`", token);
-                    // io::stdout().flush().unwrap(); // Force flush
-                }
             }
         }
         outputs
@@ -1155,10 +1130,8 @@ fn main() {
     let B: usize = 4;
     let T: usize = 64;
 
-    let train_data_path =
-        "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
-    let val_data_path =
-        "dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
+    let train_data_path = "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
+    let val_data_path = "dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
     let model_path = "gpt2_124M.bin";
     let debug_path = "gpt2_124M_debug_state.bin";
     let tokenizer_path = "gpt2_tokenizer.bin";
