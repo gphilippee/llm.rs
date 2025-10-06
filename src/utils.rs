@@ -1,4 +1,4 @@
-use rand::random;
+use rand::{random, Rng};
 
 pub fn check_tensor(pred: &[f32], target: &[f32], n: usize, label: &str) -> bool {
     let print_upto = 0;
@@ -50,4 +50,16 @@ pub fn sample_mult(probs: &[f32], n: usize) -> usize {
         }
     }
     n - 1
+}
+
+pub fn init_random_permutation(n: usize) -> Vec<usize> {
+    let permutation = (0..n).collect::<Vec<usize>>();
+    permutation
+}
+
+pub fn random_permutation(data: &mut Vec<usize>, n: usize) {
+    for i in (0..n).rev() {
+        let j = rand::thread_rng().gen_range(0..=i);
+        data.swap(i, j);
+    }
 }

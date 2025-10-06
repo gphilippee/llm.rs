@@ -1,57 +1,84 @@
+use crate::utils;
+
 pub struct DataLoader {
     dataset: Vec<usize>,
-    curr_idx: usize,
-    pub len: usize,
+    current_batch: usize,
+    pub ntok: usize,
+    pub nbatch: usize,
     B: usize, // batch size
     T: usize, // sentence length
     pub inputs: Vec<usize>,
     pub targets: Vec<usize>,
+    shuffle: bool,
+    permutation: Vec<usize>,
 }
 
 impl DataLoader {
-    pub fn new(dataset: Vec<usize>, B: usize, T: usize) -> DataLoader {
-        let len = dataset.len();
+    pub fn new(dataset: Vec<usize>, B: usize, T: usize, shuffle: bool) -> DataLoader {
+        let ntok = dataset.len();
+        assert!(ntok > 0, "Dataset is empty!");
+
+        let nbatch = ntok / (B * T);
+
+        let mut permutation = utils::init_random_permutation(nbatch);
+        if shuffle {
+            println!("Dataloader is shuffled and will be shuffled every times `reset` is call");
+            utils::random_permutation(&mut permutation, nbatch);
+        }
+
         DataLoader {
-            dataset,
-            curr_idx: 0,
-            len,
+            dataset: dataset,
+            current_batch: 0,
+            ntok,
+            nbatch,
             B,
             T,
             inputs: Vec::new(),
             targets: Vec::new(),
+            shuffle,
+            permutation,
         }
-        //todo: implement random batch
+    }
+
+    fn prepare_permutation(&self) -> Vec<usize> {
+        let mut permutation = utils::init_random_permutation(self.nbatch);
+        utils::random_permutation(&mut permutation, self.nbatch);
+        permutation
     }
 
     pub fn next_batch(&mut self) {
-        // We need one more token for the last target
-        if self.curr_idx + (self.T * self.B) + 1 > self.len {
+        if self.current_batch >= self.nbatch {
             self.reset();
         }
         self.load_batch();
 
-        // Increase self.curr_idx
-        self.curr_idx += self.T * self.B // The last token can be use as input
+        // Increase current batch
+        self.current_batch += 1
     }
 
     pub fn load_batch(&mut self) {
         self.inputs = Vec::new();
         self.targets = Vec::new();
 
-        let end: usize = self.curr_idx + self.T * self.B;
+        let permuted_batch = self.permutation[self.current_batch];
+        let idx_offset = permuted_batch * self.B * self.T;
 
-        for i in self.curr_idx..end {
-            self.inputs.push(self.dataset[i]);
-            self.targets.push(self.dataset[i + 1]);
+        for i in 0..(self.B * self.T) {
+            self.inputs.push(self.dataset[idx_offset + i]);
+            self.targets.push(self.dataset[idx_offset + i + 1]);
         }
     }
 
     pub fn reset(&mut self) {
-        self.curr_idx = 0;
+        self.current_batch = 0;
+
+        if self.shuffle {
+            self.prepare_permutation();
+        }
     }
 }
 
-pub fn create_dataloader(data_path: &str, B: usize, T: usize) -> DataLoader {
+pub fn create_dataloader(data_path: &str, B: usize, T: usize, shuffle: bool) -> DataLoader {
     // Load inputs
     let bytes = std::fs::read(data_path).unwrap();
 
@@ -67,5 +94,5 @@ pub fn create_dataloader(data_path: &str, B: usize, T: usize) -> DataLoader {
         dataset.push(token_id.into())
     }
 
-    DataLoader::new(dataset, B, T)
+    DataLoader::new(dataset, B, T, shuffle)
 }

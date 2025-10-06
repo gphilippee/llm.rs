@@ -913,20 +913,16 @@ fn train(
     val_data_path: &str,
     B: usize,
     T: usize,
+    should_suffle: bool,
 ) {
     println!("Running train...");
-    let mut train_dataloader = dataloader::create_dataloader(train_data_path, B, T);
-    println!("Load train dataloader with {} tokens", train_dataloader.len);
-    let mut val_dataloader = dataloader::create_dataloader(val_data_path, B, T);
-    println!("Load val dataloader with {} tokens", val_dataloader.len);
+    let mut train_dataloader = dataloader::create_dataloader(train_data_path, B, T, should_suffle);
+    let mut val_dataloader = dataloader::create_dataloader(val_data_path, B, T, false);
 
     let tokenizer = tokenizer::load_tokenizer(&tokenizer_path);
 
-    println!(
-        "train dataset num_batches: {}",
-        train_dataloader.len / (B * T)
-    );
-    println!("val dataset num_batches: {}", val_dataloader.len / (B * T));
+    println!("train dataset num_batches: {}", train_dataloader.nbatch);
+    println!("val dataset num_batches: {}", val_dataloader.nbatch);
     let val_num_batches = 5;
 
     let temperature: f32 = 1.0;
@@ -1129,6 +1125,7 @@ fn generate(
 fn main() {
     let B: usize = 4;
     let T: usize = 64;
+    let should_suffle: bool = true;
 
     let train_data_path = "dev/data/tinyshakespeare/tiny_shakespeare_train.bin";
     let val_data_path = "dev/data/tinyshakespeare/tiny_shakespeare_val.bin";
@@ -1143,6 +1140,7 @@ fn main() {
         val_data_path,
         B,
         T,
+        should_suffle,
     );
 
     // test(model_path, debug_path);
