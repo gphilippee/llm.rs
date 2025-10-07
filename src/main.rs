@@ -212,9 +212,6 @@ fn load_model(file: &str, temperature: f32) -> GPT2 {
         temperature: temperature,
     };
 
-    println!("Vocabulary size: {}", config.vocab_size);
-    println!("Padded vocabulary size: {}", config.padded_vocab_size);
-
     let mut param_sizes = [0; 16];
 
     let Vp = config.padded_vocab_size;
@@ -244,10 +241,6 @@ fn load_model(file: &str, temperature: f32) -> GPT2 {
     for n_params in param_sizes {
         num_parameters += n_params;
     }
-    println!(
-        "Total parameters: {}M",
-        num_parameters as u32 / 10u32.pow(6)
-    );
 
     let params = load_params(param_sizes, iter);
 
@@ -342,10 +335,6 @@ fn load_debug_state(
     let T = state_header[3] as usize;
     let V = gpt.config.vocab_size;
 
-    println!("[State]");
-    println!("batch_size: {}", B);
-    println!("seq_len: {}", T);
-
     let mut x: Vec<usize> = vec![0; B * T];
     for i in 0..B * T {
         let byte_4 = iter.next().unwrap();
@@ -369,7 +358,6 @@ fn load_debug_state(
 
     let byte_4 = iter.next().unwrap();
     let expected_loss = f32::from_be_bytes([byte_4[3], byte_4[2], byte_4[1], byte_4[0]]);
-    println!("Expected loss at step 0: {}", expected_loss);
 
     let expected_grads_memory = load_params(gpt.param_sizes, iter);
     (
@@ -419,7 +407,6 @@ fn init_activations(config: &Config, B: usize, T: usize) -> (usize, [usize; 23])
     for size in act_sizes {
         num_activations += size;
     }
-    println!("Total activations: {}M", num_activations / 10usize.pow(6));
 
     (num_activations, act_sizes)
 }
@@ -921,19 +908,34 @@ fn train(
 
     let tokenizer = tokenizer::load_tokenizer(&tokenizer_path);
 
-    println!("train dataset num_batches: {}", train_dataloader.nbatch);
-    println!("val dataset num_batches: {}", val_dataloader.nbatch);
-    let val_num_batches = 5;
-
     let temperature: f32 = 1.0;
     let mut gpt = load_model(&model_path, temperature);
     load_acts(&mut gpt, B, T);
 
     let genT: usize = 64;
+    let val_num_batches = 5;
+    let total_steps = 40;
     let Vp = gpt.config.padded_vocab_size;
     let V = gpt.config.vocab_size;
 
-    for step in 0..=40 {
+    println!("[State]");
+    println!("batch_size: {}", B);
+    println!("seq_len: {}", T);
+    println!("channels: {}", gpt.config.channels);
+    println!("num_layers: {}", gpt.config.num_layers);
+    println!("eot_token: {}", tokenizer.eot_token);
+    println!("train_dataset num_batches: {}", train_dataloader.nbatch);
+    println!("val_dataset num_batches: {}", val_num_batches);
+    println!("vocab_size: {}", V);
+    println!("padded_vocab_size: {}", Vp);
+    println!("total_params: {}M", gpt.num_parameters / 10usize.pow(6));
+    println!(
+        "total_acts: {}M",
+        gpt.num_activations.unwrap() / 10usize.pow(6)
+    );
+    println!("total_steps: {}", total_steps);
+
+    for step in 0..=total_steps {
         // validate every 10 step
         if step % 10 == 0 {
             let mut val_loss = 0f32;
@@ -945,12 +947,12 @@ fn train(
                 val_loss += mean_loss;
             }
             val_loss /= val_num_batches as f32;
-            println!("Validation loss {} at step {}", val_loss, step);
+            println!("step {}: val loss {}", step, val_loss);
         }
 
         // generate data every 20 step
         if step > 0 && step % 20 == 0 {
-            println!("Generating {} tokens...", genT);
+            println!("generating {} tokens...", genT);
             let mut gen_tokens = vec![tokenizer.eot_token; B * T];
             for t in 1..genT {
                 let probs = gpt.forward(&gen_tokens, B, T);
@@ -961,7 +963,7 @@ fn train(
             }
 
             let gen_text = tokenizer.batch_decode(&gen_tokens[1..genT]);
-            println!("Generated text: '{}'", gen_text);
+            println!("generated text: '{}'", gen_text);
         }
 
         // get data batch
@@ -1006,12 +1008,26 @@ fn test(model_path: &str, debug_path: &str) {
         0.37651097774505615,
     ];
 
-    let V = gpt.config.vocab_size;
     let L = gpt.config.num_layers;
     let C = gpt.config.channels;
     let maxT = gpt.config.max_seq_len;
+    let V = gpt.config.vocab_size;
     let Vp = gpt.config.padded_vocab_size;
     let eps = 1e-2;
+
+    println!("[State]");
+    println!("batch_size: {}", B);
+    println!("seq_len: {}", T);
+    println!("channels: {}", C);
+    println!("num_layers: {}", L);
+    println!("max_seq_len: {}", maxT);
+    println!("vocab_size: {}", V);
+    println!("padded_vocab_size: {}", Vp);
+    println!("total_params: {}M", gpt.num_parameters / 10usize.pow(6));
+    println!(
+        "total_acts: {}M",
+        gpt.num_activations.unwrap() / 10usize.pow(6)
+    );
 
     for step in 0..10 {
         let now = SystemTime::now();

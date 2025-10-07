@@ -57,7 +57,6 @@ pub fn load_tokenizer(file: &str) -> Tokenizer {
         eot_token: tokenizer_header[3] as usize,
         token_table: None,
     };
-    println!("eot_token: {}", tok.eot_token);
 
     let mut token_table: Vec<String> = Vec::new();
     let mut iter = bytes[1024..].chunks(1);
